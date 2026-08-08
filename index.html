@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#080a12" />
+    <title>Forgotten Crypt · Three.js preview</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="scene" aria-label="Forgotten Crypt game view"></canvas>
+
+      <header class="hud hud-top">
+        <div class="brand-block">
+          <span class="eyebrow">TEN-MINUTE PREVIEW</span>
+          <h1>Forgotten Crypt</h1>
+        </div>
+        <div class="health-block" aria-label="Player health">
+          <div class="health-label"><span>VITALITY</span><strong id="health-value">100 / 100</strong></div>
+          <div class="health-track"><span id="health-fill"></span></div>
+        </div>
+        <div class="threat-block">
+          <span class="eyebrow">THREATS</span>
+          <strong id="threat-value">3 REMAIN</strong>
+        </div>
+      </header>
+
+      <section class="hud quest-card" aria-live="polite">
+        <span class="eyebrow">CURRENT OBJECTIVE</span>
+        <strong id="objective">Enter the crypt</strong>
+        <p id="objective-detail">Clear the chamber, claim the chest, and find the way out.</p>
+      </section>
+
+      <div id="target-card" class="hud target-card is-hidden" aria-live="polite">
+        <span class="eyebrow">TARGET</span>
+        <strong id="target-name">—</strong>
+        <div class="target-track"><span id="target-fill"></span></div>
+      </div>
+
+      <div id="interaction" class="interaction is-hidden">Press <kbd>E</kbd> to interact</div>
+      <div id="toast" class="toast" aria-live="polite"></div>
+
+      <aside class="hud help-card">
+        <div class="help-line"><kbd>WASD</kbd><span>Move</span></div>
+        <div class="help-line"><kbd>CLICK</kbd><span>Strike</span></div>
+        <div class="help-line"><kbd>E</kbd><span>Interact</span></div>
+      </aside>
+
+      <div id="loading" class="screen-card loading-card">
+        <span class="eyebrow">LOADING THE DELVE</span>
+        <h2>Waking the old stone…</h2>
+        <div class="loading-track"><span id="loading-fill"></span></div>
+        <p id="loading-label">Preparing the lanterns</p>
+      </div>
+
+      <div id="end-screen" class="screen-card end-card is-hidden">
+        <span id="end-eyebrow" class="eyebrow">CRYPT CLEARED</span>
+        <h2 id="end-title">The old gate opens.</h2>
+        <p id="end-copy">A tiny vertical slice, built for a ten-minute wander.</p>
+        <button id="restart-button" type="button">Run it again</button>
+      </div>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
