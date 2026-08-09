@@ -4,7 +4,9 @@
 expanded preview. Its central hub opens into three connected branches with
 eleven large rooms, 36 initial enemies, branch progression, and reliquary caches.
 Every room has four times the floor area of the original layout and its own
-prop arrangement, lighting treatment, and combat formation. Solid corridor
+prop arrangement, lighting treatment, and combat formation. Burial debris,
+broken floors, flooded storage, an actual furnished archive, and a gilded
+reliquary give the branches distinct silhouettes. Solid corridor
 floors bridge every doorway, while interactive gates unload chambers behind
 the player and keep only the active room, its approaches, and an opened
 destination rendered. Chests, tombs, and columns block movement.

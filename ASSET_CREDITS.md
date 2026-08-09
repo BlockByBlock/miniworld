@@ -11,8 +11,9 @@ name and branding are not used by this preview.
 | --- | --- | --- | --- |
 | `public/assets/models/chars/players/knight.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
 | `public/assets/models/weapons/sword_1handed.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
-| `public/assets/models/chars/enemies/skeleton_warrior.glb`, `skeleton_golem.glb` | KayKit Character Pack Skeletons | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/chars/enemies/skeleton_warrior.glb`, `skeleton_golem.glb`, `skeleton_mage.glb`, `skeleton_rogue.glb`, `skeleton_minion.glb` | KayKit Character Pack Skeletons | Kay Lousberg | CC0 1.0 |
 | `public/assets/models/dungeon/*` | KayKit Dungeon Remastered | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/biome/dungeon_cobweb.glb`, `dungeon_coins.glb`, `dungeon_statue_horse.glb`, `dungeon_wood_support.glb` | Quaternius Modular Dungeons Pack | Quaternius | CC0 1.0 |
 
 The models were copied from World of ClaudeCraft at commit
 `7e8c2c3cd8136242a2d8ff29c376dd2bef66f849` on 2026-08-08. The asset register

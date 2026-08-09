@@ -59,6 +59,7 @@ const ACTIONS = {
   heal: { cooldown: 14, range: 0 },
   buff: { cooldown: 18, range: 0 },
 };
+const HEAL_FRACTION = 0.3;
 
 const ACTION_NAMES = {
   sword: 'Sword',
@@ -166,6 +167,9 @@ const ASSETS = {
   sword: '/assets/models/weapons/sword_1handed.glb',
   skeletonWarrior: '/assets/models/chars/enemies/skeleton_warrior.glb',
   skeletonGolem: '/assets/models/chars/enemies/skeleton_golem.glb',
+  skeletonMage: '/assets/models/chars/enemies/skeleton_mage.glb',
+  skeletonRogue: '/assets/models/chars/enemies/skeleton_rogue.glb',
+  skeletonMinion: '/assets/models/chars/enemies/skeleton_minion.glb',
   floorTile: '/assets/models/dungeon/floor_tile_small.glb',
   archGate: '/assets/models/dungeon/arch_gate.glb',
   torch: '/assets/models/dungeon/torch_lit.glb',
@@ -173,6 +177,25 @@ const ASSETS = {
   chestGold: '/assets/models/dungeon/chest_gold.glb',
   column: '/assets/models/dungeon/column.glb',
   crypt: '/assets/models/dungeon/crypt.glb',
+  barrelStack: '/assets/models/dungeon/barrel_small_stack.glb',
+  boneA: '/assets/models/dungeon/bone_A.glb',
+  boneB: '/assets/models/dungeon/bone_B.glb',
+  boneC: '/assets/models/dungeon/bone_c.glb',
+  bookcase: '/assets/models/dungeon/bookcase_double_decorateda.glb',
+  candleTriple: '/assets/models/dungeon/candle_triple.glb',
+  coffin: '/assets/models/dungeon/coffin_decorated.glb',
+  crateStack: '/assets/models/dungeon/crates_stacked.glb',
+  brokenFloorA: '/assets/models/dungeon/floor_tile_small_broken_A.glb',
+  brokenFloorB: '/assets/models/dungeon/floor_tile_small_broken_B.glb',
+  rubbleHalf: '/assets/models/dungeon/rubble_half.glb',
+  rubbleLarge: '/assets/models/dungeon/rubble_large.glb',
+  skull: '/assets/models/dungeon/skull.glb',
+  skullCandle: '/assets/models/dungeon/skull_candle.glb',
+  brokenTable: '/assets/models/dungeon/table_long_broken.glb',
+  cobweb: '/assets/models/biome/dungeon_cobweb.glb',
+  coins: '/assets/models/biome/dungeon_coins.glb',
+  horseStatue: '/assets/models/biome/dungeon_statue_horse.glb',
+  woodSupport: '/assets/models/biome/dungeon_wood_support.glb',
 };
 
 const WORLD = {
@@ -1178,6 +1201,37 @@ function addTomb(x, z, rotationY = 0, scale = 1) {
   });
 }
 
+function addDecoration(assetKey, x, z, {
+  y = 0,
+  rotationY = 0,
+  width,
+  depth,
+  height,
+  colliderWidth = 0,
+  colliderDepth = 0,
+} = {}) {
+  return createStatic(assetKey, {
+    x,
+    y,
+    z,
+    rotationY,
+    width,
+    depth,
+    height,
+    colliderWidth,
+    colliderDepth,
+  });
+}
+
+function addBrokenFloor(assetKey, x, z, rotationY = 0) {
+  return addDecoration(assetKey, x, z, {
+    y: 0.025,
+    rotationY,
+    width: 1.82,
+    depth: 1.82,
+  });
+}
+
 function addWallTorch(room, wall, along) {
   const inset = 0.58;
   const positions = {
@@ -1202,6 +1256,8 @@ function decorateRoom(room) {
     addColumn(7.5, 31);
     addWallTorch(room, 'west', 27);
     addWallTorch(room, 'east', 27);
+    addDecoration('candleTriple', -8.4, 29.2, { height: 0.48 });
+    addDecoration('candleTriple', 8.4, 24.8, { height: 0.48, rotationY: Math.PI / 2 });
     addRoomLight(room, 0xffbd74, 1.5);
   } else if (room.id === 'hub') {
     for (const [x, z] of [[-10, 5], [10, 5], [-10, 15], [10, 15]]) addColumn(x, z, 3);
@@ -1210,6 +1266,9 @@ function decorateRoom(room) {
     addWallTorch(room, 'north', 9);
     addWallTorch(room, 'south', -9);
     addWallTorch(room, 'south', 9);
+    addDecoration('rubbleHalf', -12.1, 3.4, { width: 1.8 });
+    addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
+    addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
     addRoomLight(room, 0xffa767, 1.75);
     addPointLight(-6.1, 4.25);
     addPointLight(6.1, 4.25, 0xffa767, 2.6);
@@ -1221,6 +1280,11 @@ function decorateRoom(room) {
     }
     addWallTorch(room, 'north', -26);
     addWallTorch(room, 'south', -26);
+    addDecoration('cobweb', -32.8, 3.1, { height: 1.25, rotationY: Math.PI / 2 });
+    addDecoration('cobweb', -19.2, 14.7, { height: 1.05, rotationY: -Math.PI / 2 });
+    addDecoration('boneA', -32, 14.1, { width: 1.15, rotationY: 0.4 });
+    addDecoration('rubbleLarge', -19.8, 3.4, { width: 1.8, rotationY: Math.PI });
+    addBrokenFloor('brokenFloorB', -26, 3.1, 0.25);
     addRoomLight(room, 0xd78b64);
   } else if (room.id === 'westBurial') {
     for (const [x, z, rotation] of [[-53, 6, 0], [-47, 6, 0], [-41, 6, 0], [-53, 13, Math.PI], [-41, 13, Math.PI]]) {
@@ -1228,12 +1292,27 @@ function decorateRoom(room) {
     }
     addWallTorch(room, 'south', -53);
     addWallTorch(room, 'south', -41);
+    addDecoration('coffin', -47, 3.3, {
+      width: 2.2,
+      height: 1,
+      colliderWidth: 2.05,
+      colliderDepth: 0.9,
+    });
+    addDecoration('skullCandle', -54.2, 14.1, { height: 0.62, rotationY: -0.4 });
+    addDecoration('boneB', -39.8, 14.1, { width: 1.1, rotationY: 1.1 });
+    addDecoration('rubbleHalf', -54.2, 3.4, { width: 1.55, rotationY: 0.7 });
     addRoomLight(room, 0xc7765c);
   } else if (room.id === 'westOssuary') {
     for (const [x, z] of [[-53, -13], [-41, -13], [-53, -4], [-41, -4]]) addColumn(x, z, 2.45);
     addTomb(-47, -7, Math.PI / 2, 1.2);
     addWallTorch(room, 'north', -53);
     addWallTorch(room, 'north', -41);
+    addDecoration('boneA', -54.1, -14, { width: 1.15, rotationY: 0.2 });
+    addDecoration('boneB', -50.6, -14.2, { width: 1.05, rotationY: 1.5 });
+    addDecoration('boneC', -43.2, -14.1, { width: 1.2, rotationY: -0.6 });
+    addDecoration('skull', -54.4, -2, { height: 0.55, rotationY: 0.7 });
+    addDecoration('skullCandle', -39.8, -2.2, { height: 0.68 });
+    addDecoration('rubbleLarge', -39.8, -14.1, { width: 1.85, rotationY: Math.PI / 2 });
     addRoomLight(room, 0xb08bff, 1.55);
   } else if (room.id === 'eastGate') {
     for (const [x, z] of [[22, 5], [30, 5], [22, 13], [30, 13]]) addColumn(x, z, 2.3);
@@ -1242,6 +1321,18 @@ function decorateRoom(room) {
     addBox({ x: 26, y: 0.03, z: 13, width: 4.5, height: 0.08, depth: 2.2, material: waterMaterial });
     addWallTorch(room, 'north', 20.5);
     addWallTorch(room, 'south', 31.5);
+    addDecoration('barrelStack', 19.6, 14.2, {
+      width: 1.4,
+      colliderWidth: 1.25,
+      colliderDepth: 1.05,
+    });
+    addDecoration('crateStack', 32.1, 3.5, {
+      width: 1.65,
+      rotationY: Math.PI / 2,
+      colliderWidth: 1.4,
+      colliderDepth: 1.15,
+    });
+    addDecoration('woodSupport', 26, 14.5, { height: 2.15 });
     addRoomLight(room, 0x65b6d1, 1.5);
   } else if (room.id === 'eastFlooded') {
     for (const [x, z, rotation] of [[41, 5, 0], [47, 5, 0], [53, 5, 0], [41, 13, Math.PI], [53, 13, Math.PI]]) {
@@ -1249,6 +1340,16 @@ function decorateRoom(room) {
     }
     addWallTorch(room, 'south', 41);
     addWallTorch(room, 'south', 53);
+    addDecoration('woodSupport', 47, 3.1, { height: 2.1, rotationY: Math.PI / 2 });
+    addDecoration('brokenTable', 54, 14.1, {
+      width: 2.2,
+      rotationY: Math.PI / 2,
+      colliderWidth: 1.9,
+      colliderDepth: 0.8,
+    });
+    addDecoration('boneC', 39.8, 14.1, { width: 1.15, rotationY: -0.8 });
+    addBrokenFloor('brokenFloorA', 47, 5, 0.3);
+    addBrokenFloor('brokenFloorB', 51, 13, -0.4);
     addRoomLight(room, 0x65b6d1, 1.45);
   } else if (room.id === 'eastReliquary') {
     for (const [x, z] of [[41, -13], [53, -13], [41, -4], [53, -4]]) addColumn(x, z, 3.1);
@@ -1256,17 +1357,43 @@ function decorateRoom(room) {
     addTomb(51, -8, Math.PI, 0.9);
     addWallTorch(room, 'north', 41);
     addWallTorch(room, 'north', 53);
+    addDecoration('horseStatue', 47, -2.2, { height: 2.35, rotationY: Math.PI });
+    addDecoration('coins', 44.8, -13.3, { width: 1.2, rotationY: 0.2 });
+    addDecoration('coins', 49.2, -13.5, { width: 1, rotationY: -0.5 });
+    addDecoration('candleTriple', 39.8, -14.1, { height: 0.52 });
+    addDecoration('candleTriple', 54.2, -14.1, { height: 0.52, rotationY: Math.PI });
     addRoomLight(room, 0xe0b75f, 1.65);
   } else if (room.id === 'northHall') {
     for (const [x, z] of [[-9, -7], [9, -7], [-9, -13], [9, -13]]) addColumn(x, z, 2.8);
     addWallTorch(room, 'west', -10);
     addWallTorch(room, 'east', -10);
+    addDecoration('rubbleHalf', -10.4, -14.4, { width: 1.55, rotationY: 0.8 });
+    addDecoration('rubbleLarge', 10.2, -5.5, { width: 1.75, rotationY: -0.5 });
+    addDecoration('cobweb', -10.8, -5.1, { height: 1.1, rotationY: Math.PI / 2 });
+    addBrokenFloor('brokenFloorB', 0, -10, Math.PI / 2);
     addRoomLight(room, 0x8e9aff, 1.4);
   } else if (room.id === 'northLibrary') {
     for (const z of [-21, -25, -29]) {
-      addTomb(-8.5, z, Math.PI / 2, 0.82);
-      addTomb(8.5, z, Math.PI / 2, 0.82);
+      addDecoration('bookcase', -10.4, z, {
+        height: 2.35,
+        rotationY: Math.PI / 2,
+        colliderWidth: 0.75,
+        colliderDepth: 1.65,
+      });
+      addDecoration('bookcase', 10.4, z, {
+        height: 2.35,
+        rotationY: -Math.PI / 2,
+        colliderWidth: 0.75,
+        colliderDepth: 1.65,
+      });
     }
+    addDecoration('brokenTable', 7.7, -30, {
+      width: 2.1,
+      colliderWidth: 1.85,
+      colliderDepth: 0.8,
+    });
+    addDecoration('candleTriple', -7.7, -19.5, { height: 0.5 });
+    addDecoration('cobweb', 10.7, -31, { height: 1.15, rotationY: -Math.PI / 2 });
     addWallTorch(room, 'west', -21);
     addWallTorch(room, 'east', -29);
     addRoomLight(room, 0xa183cf, 1.45);
@@ -1275,6 +1402,17 @@ function decorateRoom(room) {
       addTomb(x, z, rotation, 1.05);
     }
     for (const [x, z] of [[-7, -37], [7, -37], [-7, -47], [7, -47]]) addColumn(x, z, 3.2);
+    addDecoration('coffin', -13.8, -42, {
+      width: 2.2,
+      rotationY: Math.PI / 2,
+      colliderWidth: 0.9,
+      colliderDepth: 2.05,
+    });
+    addDecoration('rubbleLarge', 13.8, -35.8, { width: 1.9, rotationY: -0.6 });
+    addDecoration('skullCandle', -14.1, -35.8, { height: 0.68 });
+    addDecoration('skullCandle', 14.1, -48.2, { height: 0.68, rotationY: Math.PI });
+    addBrokenFloor('brokenFloorA', -3, -42, 0.3);
+    addBrokenFloor('brokenFloorB', 3, -42, -0.4);
     addWallTorch(room, 'north', -12);
     addWallTorch(room, 'north', 12);
     addRoomLight(room, 0xb08bff, 1.8);
@@ -1589,10 +1727,10 @@ function buildGates(wallMaterial) {
 function buildActors() {
   player = spawnActor({ assetKey: 'knight', type: 'player', name: 'Cryptwalker', x: 0, z: 26.8, height: 1.85, maxHp: 100, speed: 4.2 });
   const enemySpawns = [
-    ['Boneguard Captain', -31, 9, 'guard', 'westGate'],
-    ['Burial Hall Reaver', -27, 7, 'rusher', 'westGate'],
+    ['Boneguard Captain', -31, 9, 'guard', 'westGate', 'skeletonMinion'],
+    ['Burial Hall Reaver', -27, 7, 'rusher', 'westGate', 'skeletonRogue'],
     ['Sepulcher Watch', -23, 10, 'guard', 'westGate'],
-    ['Dustbound Ringer', -20, 7, 'pulser', 'westGate'],
+    ['Dustbound Ringer', -20, 7, 'pulser', 'westGate', 'skeletonMage'],
     ['Ashen Sentry', -54, 10, 'guard', 'westBurial'],
     ['Cinderblade', -50, 9, 'rusher', 'westBurial'],
     ['Gallery Keeper', -44, 10, 'support', 'westBurial'],
@@ -1617,15 +1755,15 @@ function buildActors() {
     ['Crossing Guard', 7, -10, 'guard', 'northHall'],
     ['Grave Bolt Acolyte', -5, -6, 'support', 'northHall'],
     ['Catacomb Ringer', 5, -14, 'pulser', 'northHall'],
-    ['Archive Acolyte', -5, -23, 'support', 'northLibrary'],
-    ['Silent Reaver', 5, -23, 'rusher', 'northLibrary'],
+    ['Archive Acolyte', -5, -23, 'support', 'northLibrary', 'skeletonMage'],
+    ['Silent Reaver', 5, -23, 'rusher', 'northLibrary', 'skeletonRogue'],
     ['Index Guard', -4, -28, 'guard', 'northLibrary'],
     ['Dust Scribe', 4, -20, 'pulser', 'northLibrary'],
     ['Warden Vanguard', -5, -41, 'guard', 'wardenKeep'],
     ['Warden Reaver', 5, -41, 'rusher', 'wardenKeep'],
     ['Warden Acolyte', 0, -45, 'support', 'wardenKeep'],
   ];
-  for (const [name, x, z, profileKey, roomId] of enemySpawns) {
+  for (const [name, x, z, profileKey, roomId, assetKey = 'skeletonWarrior'] of enemySpawns) {
     const profileStats = profileKey === 'rusher'
       ? { maxHp: 400, speed: 1.18 }
       : profileKey === 'pulser'
@@ -1634,7 +1772,7 @@ function buildActors() {
           ? { maxHp: 550, speed: 0.92 }
           : { maxHp: 500, speed: 1.05 };
     enemies.push(spawnActor({
-      assetKey: 'skeletonWarrior',
+      assetKey,
       type: 'enemy',
       name,
       x,
@@ -2758,12 +2896,15 @@ function applyPlayerAction() {
 
 function applySelfAction(action) {
   if (action === 'heal') {
-    const restored = state.playerMaxHp - state.playerHp;
-    state.playerHp = state.playerMaxHp;
+    const restored = Math.min(
+      Math.round(state.playerMaxHp * HEAL_FRACTION),
+      state.playerMaxHp - state.playerHp,
+    );
+    state.playerHp += restored;
     updateHealthUi();
     spawnSpellImpact('heal', player.root.position);
     spawnCombatText(player.root.position, `+${restored}`, '#9fe1bb', player.height + 0.2);
-    setToast(restored > 0 ? 'Vitality restored to full.' : 'Vitality is already full.');
+    setToast(restored > 0 ? `Vitality restored by ${restored}.` : 'Vitality is already full.');
   } else if (action === 'buff') {
     state.playerBuffTimer = 8;
     activateWardVisual();
@@ -3341,6 +3482,7 @@ function onKeyDown(event) {
   const key = event.key.toLowerCase();
   if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
     state.started = true;
+    state.combatStarted = true;
     keys.add(key);
     event.preventDefault();
   }
