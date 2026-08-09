@@ -38,6 +38,26 @@ const minimapContext = minimap.getContext('2d');
 const areaName = $('#area-name');
 const backpackSlots = [...document.querySelectorAll('[data-inventory-slot]')];
 const equippedItem = $('#equipped-item');
+const qualityMode = $('#quality-mode');
+
+const MAX_RENDER_PIXEL_RATIO = 1.25;
+const MAX_RENDER_PIXELS = 1920 * 1080;
+const MIN_RESOLUTION_SCALE = 0.65;
+const RESOLUTION_SAMPLE_SECONDS = 1;
+const RESOLUTION_DOWNSHIFT_MS = 20;
+const RESOLUTION_UPSHIFT_MS = 17.2;
+const RESOLUTION_STEP_DOWN = 0.1;
+const RESOLUTION_STEP_UP = 0.05;
+const RESOLUTION_CHANGE_COOLDOWN = 1.5;
+const AUTO_BLOB_SCALE_THRESHOLD = 0.75;
+const AUTO_BLOB_SLOW_SAMPLES = 2;
+const AUTO_FULL_RECOVERY_SAMPLES = 6;
+const MAX_BLOB_SHADOWS = 64;
+const ROOM_ENTRY_CLEARANCE = 1.1;
+const DISTANT_ANIMATION_INTERVAL = 0.1;
+const FULL_ANIMATION_DISTANCE_SQ = 30 ** 2;
+const ENEMY_SIMULATION_DISTANCE_SQ = 18 ** 2;
+const ENEMY_RENDER_DISTANCE_SQ = 34 ** 2;
 
 const ACTIONS = {
   sword: { cooldown: 0.7, range: 3.45 },
@@ -120,6 +140,7 @@ const ASSETS = {
   skeletonWarrior: '/assets/models/chars/enemies/skeleton_warrior.glb',
   skeletonGolem: '/assets/models/chars/enemies/skeleton_golem.glb',
   floorTile: '/assets/models/dungeon/floor_tile_small.glb',
+  archGate: '/assets/models/dungeon/arch_gate.glb',
   torch: '/assets/models/dungeon/torch_lit.glb',
   chest: '/assets/models/dungeon/chest.glb',
   chestGold: '/assets/models/dungeon/chest_gold.glb',
@@ -256,6 +277,19 @@ const MAP = {
 };
 MAP.zones = [...MAP.rooms, ...MAP.corridors];
 const corridorZones = new Set(MAP.corridors);
+const ZONE_BY_ID = new Map(MAP.zones.map((zone) => [zone.id, zone]));
+const ROOM_IDS = new Set(MAP.rooms.map((room) => room.id));
+const ZONE_NEIGHBORS = new Map(MAP.zones.map((zone) => {
+  const neighbors = MAP.zones
+    .filter((candidate) => candidate !== zone)
+    .filter((candidate) => {
+      const overlapX = Math.min(zone.maxX, candidate.maxX) - Math.max(zone.minX, candidate.minX);
+      const overlapZ = Math.min(zone.maxZ, candidate.maxZ) - Math.max(zone.minZ, candidate.minZ);
+      return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
+    })
+    .map((candidate) => candidate.id);
+  return [zone.id, neighbors];
+}));
 
 const state = {
   loaded: false,
@@ -271,6 +305,8 @@ const state = {
   archiveKey: false,
   discoveredRooms: new Set(['entrance']),
   currentRoomId: 'entrance',
+  currentZoneId: null,
+  gates: [],
   chests: [],
   openedChests: 0,
   wardenSummoned: false,
@@ -286,6 +322,18 @@ const state = {
   toastTimer: 0,
   toastText: '',
   elapsed: 0,
+  uiTimer: 0,
+  overlayTimer: 0,
+  weaponUiSheathed: null,
+  resolutionScale: 1,
+  frameSampleSeconds: 0,
+  frameSampleFrames: 0,
+  resolutionCooldown: 0,
+  fastFrameSamples: 0,
+  autoBlobSlowSamples: 0,
+  autoFullRecoverySamples: 0,
+  shadowPreference: 'auto',
+  lowQualityShadows: false,
 };
 
 const keys = new Set();
@@ -296,6 +344,10 @@ const effects = [];
 const telegraphs = [];
 const combatTexts = [];
 const lootDrops = [];
+const zoneRenderGroups = new Map();
+const visibleZoneIds = new Set();
+
+let activeWorldGroup = null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#090b14');
@@ -304,12 +356,19 @@ scene.fog = new THREE.FogExp2('#090b14', 0.018);
 const camera = new THREE.PerspectiveCamera(43, window.innerWidth / window.innerHeight, 0.1, 100);
 camera.position.set(10.6, 11.5, 12.2);
 
+function rendererPixelRatio() {
+  const viewportPixels = Math.max(1, window.innerWidth * window.innerHeight);
+  const pixelBudgetRatio = Math.sqrt(MAX_RENDER_PIXELS / viewportPixels);
+  const baseRatio = Math.max(0.5, Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO, pixelBudgetRatio));
+  return baseRatio * state.resolutionScale;
+}
+
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
   powerPreference: 'high-performance',
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(rendererPixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -348,6 +407,13 @@ let pointerPress = null;
 let actionTarget = null;
 let audioContext = null;
 let noiseBuffer = null;
+let moonLight = null;
+let blobShadowMesh = null;
+
+const blobShadowPosition = new THREE.Vector3();
+const blobShadowScale = new THREE.Vector3();
+const blobShadowRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+const blobShadowMatrix = new THREE.Matrix4();
 
 function setLoading(progress, label) {
   loadingFill.style.width = `${Math.round(progress * 100)}%`;
@@ -438,10 +504,10 @@ function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
 }
 
-function setShadows(object, receive = true) {
+function setShadows(object, { cast = true, receive = true } = {}) {
   object.traverse((child) => {
     if (!child.isMesh) return;
-    child.castShadow = true;
+    child.castShadow = cast;
     child.receiveShadow = receive;
   });
 }
@@ -498,7 +564,7 @@ function attachEquipment(visual, assetKey, boneName, { scale = 1, position = [0,
     if (Array.isArray(child.material)) child.material = child.material.map((material) => material.clone());
     else if (child.material) child.material = child.material.clone();
   });
-  setShadows(equipment, false);
+  setShadows(equipment, { receive: false });
   attachmentPoint.add(equipment);
   return equipment;
 }
@@ -565,6 +631,7 @@ class Actor {
     this.attackCooldown = 0;
     this.pendingAction = null;
     this.pendingEnemyAttack = null;
+    this.animationAccumulator = 0;
     this.frozenTimer = 0;
     this.specialCooldown = profileKey === 'warden' ? 3.5 : 0;
     this.deathTimer = 0;
@@ -636,12 +703,43 @@ class Actor {
     if (Math.abs(dx) + Math.abs(dz) > 0.001) this.root.rotation.y = Math.atan2(dx, dz);
   }
 
-  update(delta) {
-    this.mixer.update(delta);
+  faceDirection(direction) {
+    if (Math.abs(direction.x) + Math.abs(direction.z) > 0.001) {
+      this.root.rotation.y = Math.atan2(direction.x, direction.z);
+    }
+  }
+
+  update(delta, animationInterval = 0) {
+    if (animationInterval !== null) {
+      this.animationAccumulator += delta;
+      if (animationInterval <= 0 || this.animationAccumulator >= animationInterval) {
+        this.mixer.update(this.animationAccumulator);
+        this.animationAccumulator = 0;
+      }
+    }
     this.attackCooldown = Math.max(0, this.attackCooldown - delta);
     this.attackLock = Math.max(0, this.attackLock - delta);
     this.frozenTimer = Math.max(0, this.frozenTimer - delta);
     this.specialCooldown = Math.max(0, this.specialCooldown - delta);
+  }
+}
+
+function addWorldObject(object, parent = null) {
+  (parent ?? activeWorldGroup ?? scene).add(object);
+  return object;
+}
+
+function buildZoneRenderGroup(zone, build) {
+  const group = new THREE.Group();
+  group.name = `zone:${zone.id}`;
+  zoneRenderGroups.set(zone.id, group);
+  scene.add(group);
+  const previousGroup = activeWorldGroup;
+  activeWorldGroup = group;
+  try {
+    build();
+  } finally {
+    activeWorldGroup = previousGroup;
   }
 }
 
@@ -655,60 +753,307 @@ function createStatic(assetKey, {
   height,
   colliderWidth = 0,
   colliderDepth = 0,
+  castShadow = false,
+  receiveShadow = true,
+  parent = null,
 } = {}) {
   const source = assets.get(assetKey);
   const root = new THREE.Group();
   const visual = source.scene.clone(true);
   fitStaticVisual(visual, { width, depth, height });
-  setShadows(visual);
+  setShadows(visual, { cast: castShadow, receive: receiveShadow });
   root.add(visual);
   root.position.set(x, y, z);
   root.rotation.y = rotationY;
-  scene.add(root);
+  addWorldObject(root, parent);
   if (colliderWidth > 0 && colliderDepth > 0) {
     const quarterTurn = Math.abs(Math.sin(rotationY)) > 0.5;
-    staticColliders.push({
+    const collider = {
       root,
       minX: x - (quarterTurn ? colliderDepth : colliderWidth) / 2,
       maxX: x + (quarterTurn ? colliderDepth : colliderWidth) / 2,
       minZ: z - (quarterTurn ? colliderWidth : colliderDepth) / 2,
       maxZ: z + (quarterTurn ? colliderWidth : colliderDepth) / 2,
-    });
+    };
+    root.userData.staticCollider = collider;
+    staticColliders.push(collider);
   }
   return root;
 }
 
-function addBox({ x, y, z, width, height, depth, material, castShadow = false }) {
+function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
+  const source = assets.get('archGate');
+  const root = new THREE.Group();
+  const visual = source.scene.clone(true);
+
+  visual.updateMatrixWorld(true);
+  tempBox.setFromObject(visual);
+  tempBox.getSize(tempSize);
+  const localSpanAxis = tempSize.x >= tempSize.z ? 'x' : 'z';
+  const heightScale = height / tempSize.y;
+  visual.scale.setScalar(heightScale);
+  visual.updateMatrixWorld(true);
+
+  tempBox.setFromObject(visual);
+  tempBox.getSize(tempSize);
+  visual.scale[localSpanAxis] *= span / tempSize[localSpanAxis];
+  visual.updateMatrixWorld(true);
+
+  tempBox.setFromObject(visual);
+  const center = tempBox.getCenter(new THREE.Vector3());
+  visual.position.x -= center.x;
+  visual.position.y -= tempBox.min.y;
+  visual.position.z -= center.z;
+  visual.updateMatrixWorld(true);
+  setShadows(visual, { cast: false, receive: true });
+
+  root.add(visual);
+  root.position.set(x, 0, z);
+  const localSpanAlongX = localSpanAxis === 'x';
+  root.rotation.y = localSpanAlongX === travelsAlongZ ? 0 : Math.PI / 2;
+  addWorldObject(root, parent);
+
+  const colliderWidth = travelsAlongZ ? span : 0.65;
+  const colliderDepth = travelsAlongZ ? 0.65 : span;
+  const collider = {
+    root,
+    minX: x - colliderWidth / 2,
+    maxX: x + colliderWidth / 2,
+    minZ: z - colliderDepth / 2,
+    maxZ: z + colliderDepth / 2,
+  };
+  root.userData.staticCollider = collider;
+  staticColliders.push(collider);
+  return root;
+}
+
+function shiftStaticObject(root, offsetX, offsetZ) {
+  root.position.x += offsetX;
+  root.position.z += offsetZ;
+  const collider = root.userData.staticCollider;
+  if (!collider) return;
+  collider.minX += offsetX;
+  collider.maxX += offsetX;
+  collider.minZ += offsetZ;
+  collider.maxZ += offsetZ;
+}
+
+function createFloorTiles(placements) {
+  const source = assets.get('floorTile');
+  const template = source.scene.clone(true);
+  fitStaticVisual(template, { width: 1.92, depth: 1.92 });
+  template.updateMatrixWorld(true);
+
+  const translation = new THREE.Matrix4();
+  const instanceMatrix = new THREE.Matrix4();
+  template.traverse((child) => {
+    if (!child.isMesh) return;
+    const tiles = new THREE.InstancedMesh(child.geometry, child.material, placements.length);
+    tiles.name = 'instanced-floor-tiles';
+    tiles.castShadow = false;
+    tiles.receiveShadow = true;
+    placements.forEach(({ x, z }, index) => {
+      translation.makeTranslation(x, 0, z);
+      instanceMatrix.multiplyMatrices(translation, child.matrixWorld);
+      tiles.setMatrixAt(index, instanceMatrix);
+    });
+    tiles.instanceMatrix.needsUpdate = true;
+    tiles.computeBoundingSphere();
+    addWorldObject(tiles);
+  });
+}
+
+function addBox({
+  x,
+  y,
+  z,
+  width,
+  height,
+  depth,
+  material,
+  castShadow = false,
+  colliderWidth = 0,
+  colliderDepth = 0,
+  parent = null,
+}) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
   mesh.position.set(x, y, z);
   mesh.castShadow = castShadow;
   mesh.receiveShadow = true;
-  scene.add(mesh);
+  addWorldObject(mesh, parent);
+  if (colliderWidth > 0 && colliderDepth > 0) {
+    const collider = {
+      root: mesh,
+      minX: x - colliderWidth / 2,
+      maxX: x + colliderWidth / 2,
+      minZ: z - colliderDepth / 2,
+      maxZ: z + colliderDepth / 2,
+    };
+    mesh.userData.staticCollider = collider;
+    staticColliders.push(collider);
+  }
   return mesh;
 }
 
-function addPointLight(x, z, color = 0xffbd74, intensity = 2.4, castShadow = true) {
+function addPointLight(x, z, color = 0xffbd74, intensity = 2.4) {
   const light = new THREE.PointLight(color, intensity, 7, 2);
   light.position.set(x, 2.2, z);
-  light.castShadow = castShadow;
-  if (castShadow) light.shadow.mapSize.set(512, 512);
-  scene.add(light);
+  light.castShadow = false;
+  addWorldObject(light);
 }
 
 function buildLighting() {
   scene.add(new THREE.HemisphereLight(0x8886b3, 0x17131b, 1.7));
-  const moon = new THREE.DirectionalLight(0xc8c9ff, 2.1);
-  moon.position.set(-5, 12, 7);
-  moon.castShadow = true;
-  moon.shadow.mapSize.set(2048, 2048);
-  moon.shadow.camera.left = -34;
-  moon.shadow.camera.right = 34;
-  moon.shadow.camera.top = 28;
-  moon.shadow.camera.bottom = -32;
-  scene.add(moon);
-  addPointLight(-6.1, 4.25);
-  addPointLight(6.1, 4.25, 0xffa767, 2.6);
-  addPointLight(0, -4.75, 0x8e9aff, 2.2);
+  moonLight = new THREE.DirectionalLight(0xc8c9ff, 2.1);
+  moonLight.position.set(-5, 12, 7);
+  moonLight.castShadow = !state.lowQualityShadows;
+  moonLight.shadow.mapSize.set(1024, 1024);
+  moonLight.shadow.camera.left = -26;
+  moonLight.shadow.camera.right = 26;
+  moonLight.shadow.camera.top = 24;
+  moonLight.shadow.camera.bottom = -24;
+  moonLight.shadow.camera.near = 0.5;
+  moonLight.shadow.camera.far = 40;
+  moonLight.shadow.bias = -0.0008;
+  moonLight.shadow.normalBias = 0.02;
+  scene.add(moonLight, moonLight.target);
+}
+
+function updateQualityReadout() {
+  const preference = state.shadowPreference === 'auto'
+    ? `Auto · ${state.lowQualityShadows ? 'Blob' : 'Full'}`
+    : state.shadowPreference === 'low' ? 'Blob shadows' : 'Full shadows';
+  qualityMode.textContent = `${preference} · ${Math.round(state.resolutionScale * 100)}%`;
+}
+
+function setLowQualityShadows(enabled, { notify = false } = {}) {
+  if (state.lowQualityShadows === enabled) return;
+  state.lowQualityShadows = enabled;
+  if (moonLight) moonLight.castShadow = !enabled;
+  if (blobShadowMesh) blobShadowMesh.visible = enabled;
+  renderer.shadowMap.needsUpdate = true;
+  updateQualityReadout();
+  if (notify && state.loaded) {
+    setToast(enabled
+      ? 'Performance mode enabled: using lightweight blob shadows.'
+      : 'Full directional shadows restored.');
+  }
+}
+
+function cycleShadowPreference() {
+  const preferences = ['auto', 'low', 'high'];
+  const currentIndex = preferences.indexOf(state.shadowPreference);
+  state.shadowPreference = preferences[(currentIndex + 1) % preferences.length];
+  state.autoBlobSlowSamples = 0;
+  state.autoFullRecoverySamples = 0;
+  if (state.shadowPreference === 'low') {
+    setLowQualityShadows(true);
+  } else if (state.shadowPreference === 'high') {
+    setLowQualityShadows(false);
+  } else {
+    setLowQualityShadows(state.resolutionScale <= AUTO_BLOB_SCALE_THRESHOLD);
+  }
+  updateQualityReadout();
+  setToast(`Shadow quality: ${qualityMode.textContent}.`);
+}
+
+function resetFrameSample() {
+  state.frameSampleSeconds = 0;
+  state.frameSampleFrames = 0;
+}
+
+function applyAdaptiveResolutionScale(nextScale) {
+  const clamped = THREE.MathUtils.clamp(nextScale, MIN_RESOLUTION_SCALE, 1);
+  if (Math.abs(clamped - state.resolutionScale) < 0.001) return;
+  state.resolutionScale = clamped;
+  renderer.setPixelRatio(rendererPixelRatio());
+  state.resolutionCooldown = RESOLUTION_CHANGE_COOLDOWN;
+  updateQualityReadout();
+}
+
+function updateAdaptiveQuality(frameDelta) {
+  if (!state.loaded || document.hidden || frameDelta <= 0 || frameDelta > 0.25) {
+    resetFrameSample();
+    return;
+  }
+  state.resolutionCooldown = Math.max(0, state.resolutionCooldown - frameDelta);
+  state.frameSampleSeconds += frameDelta;
+  state.frameSampleFrames += 1;
+  if (state.frameSampleSeconds < RESOLUTION_SAMPLE_SECONDS) return;
+
+  const averageFrameMs = (state.frameSampleSeconds * 1000) / state.frameSampleFrames;
+  resetFrameSample();
+  if (state.resolutionCooldown <= 0) {
+    if (averageFrameMs > RESOLUTION_DOWNSHIFT_MS && state.resolutionScale > MIN_RESOLUTION_SCALE) {
+      state.fastFrameSamples = 0;
+      applyAdaptiveResolutionScale(state.resolutionScale - RESOLUTION_STEP_DOWN);
+    } else if (averageFrameMs < RESOLUTION_UPSHIFT_MS && state.resolutionScale < 1) {
+      state.fastFrameSamples += 1;
+      if (state.fastFrameSamples >= 2) {
+        state.fastFrameSamples = 0;
+        applyAdaptiveResolutionScale(state.resolutionScale + RESOLUTION_STEP_UP);
+      }
+    } else {
+      state.fastFrameSamples = 0;
+    }
+  }
+
+  if (state.shadowPreference !== 'auto') return;
+  if (!state.lowQualityShadows) {
+    state.autoBlobSlowSamples = state.resolutionScale <= AUTO_BLOB_SCALE_THRESHOLD
+      && averageFrameMs > RESOLUTION_DOWNSHIFT_MS
+      ? state.autoBlobSlowSamples + 1
+      : 0;
+    if (state.autoBlobSlowSamples >= AUTO_BLOB_SLOW_SAMPLES) {
+      state.autoBlobSlowSamples = 0;
+      setLowQualityShadows(true, { notify: true });
+    }
+  } else {
+    state.autoFullRecoverySamples = state.resolutionScale >= 0.9
+      && averageFrameMs < RESOLUTION_UPSHIFT_MS
+      ? state.autoFullRecoverySamples + 1
+      : 0;
+    if (state.autoFullRecoverySamples >= AUTO_FULL_RECOVERY_SAMPLES) {
+      state.autoFullRecoverySamples = 0;
+      setLowQualityShadows(false, { notify: true });
+    }
+  }
+}
+
+function buildBlobShadows() {
+  const geometry = new THREE.CircleGeometry(1, 20);
+  const material = new THREE.MeshBasicMaterial({
+    color: 0x05050a,
+    transparent: true,
+    opacity: 0.32,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  blobShadowMesh = new THREE.InstancedMesh(geometry, material, MAX_BLOB_SHADOWS);
+  blobShadowMesh.name = 'blob-shadows';
+  blobShadowMesh.count = 0;
+  blobShadowMesh.visible = state.lowQualityShadows;
+  blobShadowMesh.frustumCulled = false;
+  blobShadowMesh.renderOrder = 1;
+  blobShadowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(blobShadowMesh);
+}
+
+function updateBlobShadows() {
+  if (!blobShadowMesh?.visible) return;
+  let count = 0;
+  for (const actor of [player, ...enemies]) {
+    if (!actor || actor.dead || !actor.root.visible || count >= MAX_BLOB_SHADOWS) continue;
+    const radius = actor.profileKey === 'warden' ? 1.05 : actor.type === 'player' ? 0.62 : 0.56;
+    blobShadowPosition.set(actor.root.position.x, 0.035, actor.root.position.z);
+    blobShadowScale.set(radius, radius, 1);
+    blobShadowMatrix.compose(blobShadowPosition, blobShadowRotation, blobShadowScale);
+    blobShadowMesh.setMatrixAt(count, blobShadowMatrix);
+    count += 1;
+  }
+  blobShadowMesh.count = count;
+  blobShadowMesh.instanceMatrix.needsUpdate = true;
 }
 
 function addWallSpan({ fixed, start, end, openings = [], horizontal, material }) {
@@ -782,10 +1127,10 @@ function buildRoomWalls(room, wallMaterial) {
   });
 }
 
-function tileZone(zone) {
+function tileZone(zone, placements) {
   for (let x = zone.minX + 1; x < zone.maxX; x += 2) {
     for (let z = zone.minZ + 1; z < zone.maxZ; z += 2) {
-      createStatic('floorTile', { x, z, width: 1.92, depth: 1.92 });
+      placements.push({ x, z });
     }
   }
 }
@@ -833,7 +1178,7 @@ function addWallTorch(room, wall, along) {
 
 function addRoomLight(room, color, intensity = 1.35) {
   const center = roomCenter(room);
-  addPointLight(center.x, center.z, color, intensity, false);
+  addPointLight(center.x, center.z, color, intensity);
 }
 
 function decorateRoom(room) {
@@ -853,6 +1198,9 @@ function decorateRoom(room) {
     addWallTorch(room, 'south', -9);
     addWallTorch(room, 'south', 9);
     addRoomLight(room, 0xffa767, 1.75);
+    addPointLight(-6.1, 4.25);
+    addPointLight(6.1, 4.25, 0xffa767, 2.6);
+    addPointLight(0, -4.75, 0x8e9aff, 2.2);
   } else if (room.id === 'westGate') {
     for (const x of [-30, -26, -22]) {
       addTomb(x, 4.4, Math.PI / 2, 0.82);
@@ -948,28 +1296,38 @@ function buildCrypt() {
     roughness: 0.96,
     metalness: 0.02,
   });
-  for (const room of MAP.rooms) tileZone(room);
   const corridorMaterial = new THREE.MeshStandardMaterial({
     color: 0x34374a,
     roughness: 0.9,
     metalness: 0.03,
   });
-  for (const corridor of MAP.corridors) {
-    addBox({
-      x: (corridor.minX + corridor.maxX) / 2,
-      y: -0.055,
-      z: (corridor.minZ + corridor.maxZ) / 2,
-      width: corridor.maxX - corridor.minX + 0.4,
-      height: 0.1,
-      depth: corridor.maxZ - corridor.minZ + 0.4,
-      material: corridorMaterial,
+
+  for (const room of MAP.rooms) {
+    buildZoneRenderGroup(room, () => {
+      const floorPlacements = [];
+      tileZone(room, floorPlacements);
+      createFloorTiles(floorPlacements);
+      buildRoomWalls(room, wallMaterial);
+      decorateRoom(room);
     });
-    tileZone(corridor);
   }
-  MAP.rooms.forEach((room) => {
-    buildRoomWalls(room, wallMaterial);
-    decorateRoom(room);
-  });
+  for (const corridor of MAP.corridors) {
+    buildZoneRenderGroup(corridor, () => {
+      addBox({
+        x: (corridor.minX + corridor.maxX) / 2,
+        y: -0.055,
+        z: (corridor.minZ + corridor.maxZ) / 2,
+        width: corridor.maxX - corridor.minX + 0.4,
+        height: 0.1,
+        depth: corridor.maxZ - corridor.minZ + 0.4,
+        material: corridorMaterial,
+      });
+      const floorPlacements = [];
+      tileZone(corridor, floorPlacements);
+      createFloorTiles(floorPlacements);
+    });
+  }
+  return wallMaterial;
 }
 
 function spawnActor({ assetKey, type, name, x, z, height, maxHp, speed, profileKey, roomId }) {
@@ -1004,6 +1362,7 @@ function buildChests() {
       z: chest.z,
       width: 1.35,
       height: 1.05,
+      parent: zoneRenderGroups.get(chest.roomId),
       colliderWidth: 1.25,
       colliderDepth: 0.9,
     }),
@@ -1011,6 +1370,118 @@ function buildChests() {
     rewardRoot: null,
   }));
   state.openedChests = 0;
+}
+
+function gateWallPosition(corridor, roomId, travelsAlongZ) {
+  const corridorX = (corridor.minX + corridor.maxX) / 2;
+  const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
+  const room = ZONE_BY_ID.get(roomId);
+  const center = roomCenter(room);
+  return {
+    x: travelsAlongZ
+      ? corridorX
+      : center.x < corridorX ? room.maxX : room.minX,
+    z: travelsAlongZ
+      ? center.z < corridorZ ? room.maxZ : room.minZ
+      : corridorZ,
+  };
+}
+
+function moveGateAssemblyToRoom(gate, roomId) {
+  const corridor = ZONE_BY_ID.get(gate.corridorId);
+  const nextPosition = gateWallPosition(corridor, roomId, gate.travelsAlongZ);
+  const offsetX = nextPosition.x - gate.position.x;
+  const offsetZ = nextPosition.z - gate.position.z;
+  if (Math.abs(offsetX) + Math.abs(offsetZ) < 0.001) return;
+  shiftStaticObject(gate.root, offsetX, offsetZ);
+  gate.wallRoots.forEach((root) => shiftStaticObject(root, offsetX, offsetZ));
+  gate.position.set(nextPosition.x, 0, nextPosition.z);
+}
+
+function buildGates(wallMaterial) {
+  state.gates = MAP.corridors.map((corridor) => {
+    const roomIds = (ZONE_NEIGHBORS.get(corridor.id) ?? []).filter((id) => ROOM_IDS.has(id));
+    if (roomIds.length !== 2) {
+      throw new Error(`Corridor ${corridor.id} must connect exactly two rooms.`);
+    }
+    const width = corridor.maxX - corridor.minX;
+    const depth = corridor.maxZ - corridor.minZ;
+    const connectedRoomCenters = roomIds.map((id) => roomCenter(ZONE_BY_ID.get(id)));
+    const travelsAlongZ = Math.abs(connectedRoomCenters[1].z - connectedRoomCenters[0].z)
+      > Math.abs(connectedRoomCenters[1].x - connectedRoomCenters[0].x);
+    // MAP room order follows progression, so mount the assembly on the wall
+    // of the first connected room until the player opens it.
+    const { x, z } = gateWallPosition(corridor, roomIds[0], travelsAlongZ);
+    const span = travelsAlongZ ? width : depth;
+    const openingWidth = Math.min(3.6, span - 1.2);
+    const gateWallOverlap = 0.45;
+    const wallThickness = 0.5;
+    const parent = zoneRenderGroups.get(corridor.id);
+    const wallRoots = [];
+
+    if (travelsAlongZ) {
+      const wallSections = [
+        [corridor.minX, x - openingWidth / 2 + gateWallOverlap],
+        [x + openingWidth / 2 - gateWallOverlap, corridor.maxX],
+      ];
+      for (const [startX, endX] of wallSections) {
+        const sideWidth = endX - startX;
+        wallRoots.push(addBox({
+          x: (startX + endX) / 2,
+          y: 1.35,
+          z,
+          width: sideWidth,
+          height: 2.7,
+          depth: wallThickness,
+          material: wallMaterial,
+          colliderWidth: sideWidth,
+          colliderDepth: wallThickness,
+          parent,
+        }));
+      }
+    } else {
+      const wallSections = [
+        [corridor.minZ, z - openingWidth / 2 + gateWallOverlap],
+        [z + openingWidth / 2 - gateWallOverlap, corridor.maxZ],
+      ];
+      for (const [startZ, endZ] of wallSections) {
+        const sideWidth = endZ - startZ;
+        wallRoots.push(addBox({
+          x,
+          y: 1.35,
+          z: (startZ + endZ) / 2,
+          width: wallThickness,
+          height: 2.7,
+          depth: sideWidth,
+          material: wallMaterial,
+          colliderWidth: wallThickness,
+          colliderDepth: sideWidth,
+          parent,
+        }));
+      }
+    }
+
+    const root = createGateStatic({
+      x,
+      z,
+      travelsAlongZ,
+      span: openingWidth,
+      height: 3.2,
+      parent,
+    });
+    return {
+      id: `${corridor.id}-gate`,
+      corridorId: corridor.id,
+      roomIds,
+      travelsAlongZ,
+      position: new THREE.Vector3(x, 0, z),
+      root,
+      wallRoots,
+      open: false,
+      fromRoomId: null,
+      toRoomId: null,
+    };
+  });
 }
 
 function buildActors() {
@@ -1088,9 +1559,11 @@ function buildActors() {
 
 function buildWorld() {
   buildLighting();
-  buildCrypt();
+  const wallMaterial = buildCrypt();
   buildChests();
+  buildGates(wallMaterial);
   buildActors();
+  buildBlobShadows();
   updateHealthUi();
   updateQuestUi();
 }
@@ -1117,13 +1590,43 @@ function chestById(id) {
   return state.chests.find((chest) => chest.id === id) ?? null;
 }
 
-function roomAtPosition(position) {
-  return MAP.rooms.find((room) => (
-    position.x >= room.minX
-    && position.x <= room.maxX
-    && position.z >= room.minZ
-    && position.z <= room.maxZ
-  )) ?? null;
+function containsPosition(zone, position, inset = 0) {
+  return position.x >= zone.minX + inset
+    && position.x <= zone.maxX - inset
+    && position.z >= zone.minZ + inset
+    && position.z <= zone.maxZ - inset;
+}
+
+function roomAtPosition(position, inset = 0) {
+  return MAP.rooms.find((room) => containsPosition(room, position, inset)) ?? null;
+}
+
+function zoneAtPosition(position) {
+  return roomAtPosition(position)
+    ?? MAP.corridors.find((corridor) => containsPosition(corridor, position))
+    ?? null;
+}
+
+function updateZoneVisibility(roomId, force = false) {
+  if (!ROOM_IDS.has(roomId)) return;
+  const nextVisible = new Set([roomId]);
+  for (const neighborId of ZONE_NEIGHBORS.get(roomId) ?? []) {
+    if (!ROOM_IDS.has(neighborId)) nextVisible.add(neighborId);
+  }
+  for (const gate of state.gates) {
+    if (!gate.open) continue;
+    nextVisible.add(gate.corridorId);
+    gate.roomIds.forEach((id) => nextVisible.add(id));
+  }
+  const changed = force
+    || nextVisible.size !== visibleZoneIds.size
+    || [...nextVisible].some((id) => !visibleZoneIds.has(id));
+  if (!changed) return;
+  visibleZoneIds.clear();
+  nextVisible.forEach((id) => visibleZoneIds.add(id));
+  zoneRenderGroups.forEach((group, id) => {
+    group.visible = visibleZoneIds.has(id);
+  });
 }
 
 function livingEnemiesInBranch(branch, { includeWarden = true } = {}) {
@@ -1139,20 +1642,41 @@ function livingEnemiesInRoom(roomId) {
 }
 
 function isEnemyAccessible(enemy) {
-  return true;
+  return visibleZoneIds.has(enemy.roomId);
 }
 
 function updateProgression() {
-  const room = roomAtPosition(player.root.position);
-  if (room) {
-    const enteredNewRoom = room.id !== state.currentRoomId;
-    state.currentRoomId = room.id;
-    state.discoveredRooms.add(room.id);
-    areaName.textContent = room.label;
-    if (enteredNewRoom && state.started) {
-      playSfx('room');
-      addCameraFeedback(0.035, 1.1);
-    }
+  const zone = zoneAtPosition(player.root.position);
+  if (zone && zone.id !== state.currentZoneId) {
+    state.currentZoneId = zone.id;
+  }
+  // Keep the gate open until the entire actor has cleared its collider rather
+  // than closing on the first frame their center crosses the room boundary.
+  const room = roomAtPosition(player.root.position, ROOM_ENTRY_CLEARANCE);
+  if (!room) return;
+  const enteredNewRoom = room.id !== state.currentRoomId;
+  if (!enteredNewRoom) {
+    if (visibleZoneIds.size === 0) updateZoneVisibility(room.id, true);
+    return;
+  }
+  const previousRoomId = state.currentRoomId;
+  const traversedGate = state.gates.find((gate) => (
+    gate.open && gate.fromRoomId === previousRoomId && gate.toRoomId === room.id
+  ));
+  if (traversedGate) {
+    traversedGate.open = false;
+    traversedGate.root.visible = true;
+    traversedGate.fromRoomId = null;
+    traversedGate.toRoomId = null;
+  }
+  state.currentRoomId = room.id;
+  state.discoveredRooms.add(room.id);
+  areaName.textContent = room.label;
+  updateZoneVisibility(room.id, true);
+  if (state.started) {
+    playSfx('room');
+    addCameraFeedback(0.035, 1.1);
+    if (traversedGate) setToast('The gate closes and the previous chamber fades into the dark.');
   }
 }
 
@@ -1495,6 +2019,48 @@ function nearestClosedChest(maxDistance = Infinity) {
   return nearest;
 }
 
+function nearestClosedGate(maxDistance = Infinity) {
+  let nearest = null;
+  let nearestDistance = maxDistance;
+  for (const gate of state.gates) {
+    if (gate.open || !zoneRenderGroups.get(gate.corridorId)?.visible) continue;
+    const distance = player.root.position.distanceTo(gate.position);
+    if (distance < nearestDistance) {
+      nearest = gate;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function openGate(gate) {
+  if (!gate || gate.open || !gate.roomIds.includes(state.currentRoomId)) return;
+  const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
+  if (remainingEnemies > 0) {
+    setToast(`The gate is sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}.`, 1800);
+    return;
+  }
+  for (const otherGate of state.gates) {
+    if (!otherGate.open) continue;
+    moveGateAssemblyToRoom(otherGate, otherGate.fromRoomId);
+    otherGate.open = false;
+    otherGate.root.visible = true;
+    otherGate.fromRoomId = null;
+    otherGate.toRoomId = null;
+  }
+  gate.open = true;
+  gate.fromRoomId = state.currentRoomId;
+  gate.toRoomId = gate.roomIds.find((id) => id !== state.currentRoomId) ?? null;
+  moveGateAssemblyToRoom(gate, gate.toRoomId);
+  gate.root.visible = false;
+  updateZoneVisibility(state.currentRoomId, true);
+  const destination = ZONE_BY_ID.get(gate.toRoomId);
+  playSfx('room');
+  addCameraFeedback(0.045, 0.7);
+  spawnCombatText(gate.position, 'GATE OPEN', '#c9b2f0', 2.1);
+  setToast(`${destination?.label ?? 'The next chamber'} emerges from the dark.`);
+}
+
 function chestBlockReason(chest) {
   if (!chest || chest.opened) return '';
   if (chest.kind === 'seal' && livingEnemiesInBranch(chest.branch).length > 0) {
@@ -1554,15 +2120,35 @@ function updateInteractionUi() {
   }
   const nearbyLoot = nearestLootDrop(1.9);
   const nearbyChest = nearestClosedChest(2.1);
+  const nearbyGate = nearestClosedGate(2.4);
   if (nearbyLoot) {
     interaction.classList.remove('is-hidden');
     interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[nearbyLoot.itemId].name.toLowerCase()}`;
   } else if (nearbyChest) {
     interaction.classList.remove('is-hidden');
     interaction.innerHTML = `Press <kbd>E</kbd> to open ${nearbyChest.name.toLowerCase()}`;
+  } else if (nearbyGate) {
+    interaction.classList.remove('is-hidden');
+    const destinationId = nearbyGate.roomIds.find((id) => id !== state.currentRoomId);
+    const destination = ZONE_BY_ID.get(destinationId);
+    const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
+    interaction.innerHTML = remainingEnemies > 0
+      ? `Gate sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}`
+      : `Press <kbd>E</kbd> to open the way to ${(destination?.label ?? 'the next chamber').toLowerCase()}`;
   } else {
     interaction.classList.add('is-hidden');
   }
+}
+
+function updateInterface(delta, force = false) {
+  state.uiTimer -= delta;
+  if (!force && state.uiTimer > 0) return;
+  state.uiTimer = 0.1;
+  updateHealthUi();
+  updateActionUi();
+  updateTargetUi();
+  updateQuestUi();
+  updateInteractionUi();
 }
 
 function spawnBurst(position, color = 0xf0c071, count = 12) {
@@ -1860,16 +2446,16 @@ function updatePlayer(delta) {
     if (player.attackTimer <= 0) applyPlayerAction();
   }
   if (player.attackLock <= 0) {
-    const direction = new THREE.Vector3(
+    tempVector.set(
       (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0),
       0,
       (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0),
     );
-    if (direction.lengthSq() > 0) {
-      direction.normalize();
+    if (tempVector.lengthSq() > 0) {
+      tempVector.normalize();
       const speed = player.speed * (state.playerBuffTimer > 0 ? 1.25 : 1);
-      moveActorWithinMap(player, direction.x * speed * delta, direction.z * speed * delta, 0.65);
-      player.face(player.root.position.clone().add(direction));
+      moveActorWithinMap(player, tempVector.x * speed * delta, tempVector.z * speed * delta, 0.65);
+      player.faceDirection(tempVector);
       player.play(['running', 'walking']);
       if (state.footstepTimer <= 0) {
         playSfx('step');
@@ -1887,9 +2473,11 @@ function updateWeaponState(delta) {
     !enemy.dead
     && enemy.awake
     && !enemy.evading
-    && player.root.position.distanceTo(enemy.root.position) < 8
+    && player.root.position.distanceToSquared(enemy.root.position) < 8 ** 2
   ));
   player.setWeaponSheathed(state.weaponReadyTimer <= 0 && !nearbyThreat && player.attackLock <= 0);
+  if (state.weaponUiSheathed === player.weaponSheathed) return;
+  state.weaponUiSheathed = player.weaponSheathed;
   equippedItem.dataset.weaponState = player.weaponSheathed ? 'sheathed' : 'drawn';
   equippedItem.setAttribute('aria-label', `Weapon ${player.weaponSheathed ? 'sheathed' : 'drawn'}`);
 }
@@ -1898,7 +2486,7 @@ function moveEnemy(enemy, direction, speed, delta) {
   if (direction.lengthSq() <= 0.001) return;
   direction.normalize();
   moveActorWithinMap(enemy, direction.x * speed * delta, direction.z * speed * delta, 0.65);
-  enemy.face(enemy.root.position.clone().add(direction));
+  enemy.faceDirection(direction);
   enemy.play(['running', 'walking']);
 }
 
@@ -2203,6 +2791,10 @@ function updateCamera(delta) {
     camera.fov = nextFov;
     camera.updateProjectionMatrix();
   }
+  if (moonLight) {
+    moonLight.position.set(player.root.position.x - 5, 12, player.root.position.z + 7);
+    moonLight.target.position.set(player.root.position.x, 0, player.root.position.z);
+  }
 }
 
 function openChest(chest) {
@@ -2219,6 +2811,7 @@ function openChest(chest) {
     z: chest.position.z,
     width: 1.35,
     height: 1.05,
+    parent: zoneRenderGroups.get(chest.roomId),
     colliderWidth: 1.25,
     colliderDepth: 0.9,
   });
@@ -2265,6 +2858,8 @@ function interact() {
     openChest(nearbyChest);
     return;
   }
+  const nearbyGate = nearestClosedGate(2.4);
+  if (nearbyGate) openGate(nearbyGate);
 }
 
 function finishRun(success) {
@@ -2314,6 +2909,7 @@ function onKeyDown(event) {
     event.preventDefault();
   }
   if (key === 'e' && !event.repeat) interact();
+  if (key === 'q' && !event.repeat) cycleShadowPreference();
   if (key === 'escape') closeActionMenu();
   if (event.code === 'Space' && !event.repeat) {
     closeActionMenu();
@@ -2328,7 +2924,9 @@ function onKeyUp(event) {
 
 function animate() {
   requestAnimationFrame(animate);
-  const delta = Math.min(clock.getDelta(), 0.05);
+  const frameDelta = clock.getDelta();
+  updateAdaptiveQuality(frameDelta);
+  const delta = Math.min(frameDelta, 0.05);
   if (state.loaded && !state.finished && !state.failed) {
     state.elapsed += delta;
     state.playerBuffTimer = Math.max(0, state.playerBuffTimer - delta);
@@ -2343,21 +2941,34 @@ function animate() {
       finishRun(true);
     }
     for (const enemy of enemies) {
-      enemy.update(delta);
+      if (enemy.dead && !enemy.root.visible) continue;
+      const distanceSq = player.root.position.distanceToSquared(enemy.root.position);
+      const roomVisible = visibleZoneIds.has(enemy.roomId);
+      const shouldRender = roomVisible && distanceSq <= ENEMY_RENDER_DISTANCE_SQ;
+      if (!enemy.dead && enemy.root.visible !== shouldRender) {
+        enemy.root.visible = shouldRender;
+      }
+      const animationInterval = !roomVisible
+        ? null
+        : distanceSq > FULL_ANIMATION_DISTANCE_SQ ? DISTANT_ANIMATION_INTERVAL : 0;
+      enemy.update(delta, animationInterval);
+      if (!roomVisible) continue;
+      if (!enemy.awake && !enemy.evading && distanceSq > ENEMY_SIMULATION_DISTANCE_SQ) continue;
       updateEnemy(enemy, delta);
     }
+    updateBlobShadows();
     updateEffects(delta);
     updateLootDrops(delta);
     updateTelegraphs(delta);
     updateCombatTexts(delta);
     updateCamera(delta);
-    updateEnemyNameplates();
+    state.overlayTimer -= delta;
+    if (state.overlayTimer <= 0) {
+      state.overlayTimer = 1 / 30;
+      updateEnemyNameplates();
+    }
     updateMinimap(delta);
-    updateHealthUi();
-    updateActionUi();
-    updateTargetUi();
-    updateQuestUi();
-    updateInteractionUi();
+    updateInterface(delta);
     updateActionMenuPosition();
   }
   renderer.render(scene, camera);
@@ -2367,7 +2978,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(rendererPixelRatio());
 });
 window.addEventListener('keydown', onKeyDown, { passive: false });
 window.addEventListener('keyup', onKeyUp);
@@ -2402,9 +3013,12 @@ async function start() {
   try {
     await loadAssets();
     buildWorld();
+    setLoading(0.98, 'Settling the shadows');
+    await renderer.compileAsync(scene, camera);
     state.loaded = true;
     updateProgression();
-    updateActionUi();
+    updateQualityReadout();
+    updateInterface(0, true);
     updateInventoryUi();
     updateMinimap(0, true);
     setLoading(1, 'The crypt is awake');

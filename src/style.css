@@ -58,9 +58,8 @@ button {
 
 .hud {
   border: 1px solid rgba(235, 217, 179, 0.16);
-  background: linear-gradient(135deg, rgba(16, 18, 31, 0.88), rgba(11, 13, 23, 0.72));
+  background: linear-gradient(135deg, rgba(16, 18, 31, 0.92), rgba(11, 13, 23, 0.86));
   box-shadow: 0 16px 50px rgba(0, 0, 0, 0.2), inset 0 1px rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(13px);
 }
 
 .hud-top {
