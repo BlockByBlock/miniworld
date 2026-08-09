@@ -10,6 +10,7 @@ name and branding are not used by this preview.
 | Local files | Source pack | Author | License |
 | --- | --- | --- | --- |
 | `public/assets/models/chars/players/knight.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/weapons/sword_1handed.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
 | `public/assets/models/chars/enemies/skeleton_warrior.glb`, `skeleton_golem.glb` | KayKit Character Pack Skeletons | Kay Lousberg | CC0 1.0 |
 | `public/assets/models/dungeon/*` | KayKit Dungeon Remastered | Kay Lousberg | CC0 1.0 |
 

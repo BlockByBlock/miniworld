@@ -12,37 +12,101 @@
 
       <header class="hud hud-top">
         <div class="brand-block">
-          <span class="eyebrow">TEN-MINUTE PREVIEW</span>
+          <span class="eyebrow">EXPANDED PREVIEW</span>
           <h1>Forgotten Crypt</h1>
         </div>
         <div class="health-block" aria-label="Player health">
           <div class="health-label"><span>VITALITY</span><strong id="health-value">100 / 100</strong></div>
           <div class="health-track"><span id="health-fill"></span></div>
+          <div id="player-status" class="status-row" aria-live="polite"></div>
         </div>
         <div class="threat-block">
           <span class="eyebrow">THREATS</span>
-          <strong id="threat-value">3 REMAIN</strong>
+          <strong id="threat-value">36 REMAIN</strong>
         </div>
       </header>
 
       <section class="hud quest-card" aria-live="polite">
         <span class="eyebrow">CURRENT OBJECTIVE</span>
         <strong id="objective">Enter the crypt</strong>
-        <p id="objective-detail">Clear the chamber, claim the chest, and find the way out.</p>
+        <p id="objective-detail">Clear the three branches, claim the reliquaries, and return to the entrance.</p>
       </section>
 
       <div id="target-card" class="hud target-card is-hidden" aria-live="polite">
         <span class="eyebrow">TARGET</span>
         <strong id="target-name">—</strong>
         <div class="target-track"><span id="target-fill"></span></div>
+        <div id="target-status" class="status-row"></div>
       </div>
+
+      <aside class="hud minimap-card" aria-label="Crypt map">
+        <div class="minimap-heading">
+          <span class="eyebrow">CRYPT MAP</span>
+          <strong id="area-name">Entrance Vault</strong>
+        </div>
+        <canvas id="minimap" width="240" height="190"></canvas>
+        <div class="minimap-legend" aria-hidden="true">
+          <span><i class="legend-dot legend-player"></i>You</span>
+          <span><i class="legend-dot legend-seal"></i>Seal</span>
+        </div>
+      </aside>
 
       <div id="interaction" class="interaction is-hidden">Press <kbd>E</kbd> to interact</div>
       <div id="toast" class="toast" aria-live="polite"></div>
 
+      <div id="action-menu" class="action-menu is-hidden" role="menu" aria-label="Choose an action">
+        <span id="action-menu-title" class="action-menu-title">ENEMY ACTIONS</span>
+        <div class="action-options">
+          <button class="action-bubble" data-action="sword" data-scope="enemy" type="button" role="menuitem">
+            <span class="action-glyph" aria-hidden="true">⚔</span>
+            <span class="action-label">Sword</span>
+          </button>
+          <button class="action-bubble" data-action="fire" data-scope="enemy" type="button" role="menuitem">
+            <span class="action-glyph" aria-hidden="true">✹</span>
+            <span class="action-label">Fire</span>
+          </button>
+          <button class="action-bubble" data-action="freeze" data-scope="enemy" type="button" role="menuitem">
+            <span class="action-glyph" aria-hidden="true">❄</span>
+            <span class="action-label">Freeze</span>
+          </button>
+          <button class="action-bubble" data-action="heal" data-scope="self" type="button" role="menuitem">
+            <span class="action-glyph" aria-hidden="true">✚</span>
+            <span class="action-label">Heal</span>
+          </button>
+          <button class="action-bubble" data-action="buff" data-scope="self" type="button" role="menuitem">
+            <span class="action-glyph" aria-hidden="true">✦</span>
+            <span class="action-label">Ward</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="ability-strip" class="hud ability-strip" aria-label="Ability cooldowns">
+        <div class="ability-slot" data-ability="sword"><span>⚔</span><small>Sword</small><strong>READY</strong></div>
+        <div class="ability-slot" data-ability="fire"><span>✹</span><small>Fire</small><strong>READY</strong></div>
+        <div class="ability-slot" data-ability="freeze"><span>❄</span><small>Freeze</small><strong>READY</strong></div>
+        <div class="ability-slot" data-ability="heal"><span>✚</span><small>Heal</small><strong>READY</strong></div>
+        <div class="ability-slot" data-ability="buff"><span>✦</span><small>Ward</small><strong>READY</strong></div>
+      </div>
+
+      <aside class="hud backpack-card" aria-label="Six-slot backpack">
+        <div class="backpack-heading">
+          <span class="eyebrow">BACKPACK</span>
+          <span id="equipped-item" class="equipped-item">No relic equipped</span>
+        </div>
+        <div id="backpack-slots" class="backpack-slots">
+          <button class="backpack-slot" data-inventory-slot="0" type="button" aria-label="Empty backpack slot 1"></button>
+          <button class="backpack-slot" data-inventory-slot="1" type="button" aria-label="Empty backpack slot 2"></button>
+          <button class="backpack-slot" data-inventory-slot="2" type="button" aria-label="Empty backpack slot 3"></button>
+          <button class="backpack-slot" data-inventory-slot="3" type="button" aria-label="Empty backpack slot 4"></button>
+          <button class="backpack-slot" data-inventory-slot="4" type="button" aria-label="Empty backpack slot 5"></button>
+          <button class="backpack-slot" data-inventory-slot="5" type="button" aria-label="Empty backpack slot 6"></button>
+        </div>
+      </aside>
+
       <aside class="hud help-card">
         <div class="help-line"><kbd>WASD</kbd><span>Move</span></div>
-        <div class="help-line"><kbd>CLICK</kbd><span>Strike</span></div>
+        <div class="help-line"><kbd>DRAG</kbd><span>View</span></div>
+        <div class="help-line"><kbd>CLICK</kbd><span>Actions</span></div>
         <div class="help-line"><kbd>E</kbd><span>Interact</span></div>
       </aside>
 
@@ -55,8 +119,8 @@
 
       <div id="end-screen" class="screen-card end-card is-hidden">
         <span id="end-eyebrow" class="eyebrow">CRYPT CLEARED</span>
-        <h2 id="end-title">The old gate opens.</h2>
-        <p id="end-copy">A tiny vertical slice, built for a ten-minute wander.</p>
+        <h2 id="end-title">The path is clear.</h2>
+        <p id="end-copy">The expanded crypt is clear.</p>
         <button id="restart-button" type="button">Run it again</button>
       </div>
     </main>
