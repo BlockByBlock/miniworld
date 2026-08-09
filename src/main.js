@@ -2546,7 +2546,7 @@ function updateSpellProjectiles(delta) {
           applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
           spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
         } else {
-          const damage = playerDamage(target.profileKey === 'warden' ? 12 : 17, 'fire');
+          const damage = playerDamage(target.profileKey === 'warden' ? 24 : 34, 'fire');
           applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
         }
       }
