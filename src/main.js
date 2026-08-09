@@ -29,16 +29,12 @@ const targetStatus = $('#target-status');
 const playerStatus = $('#player-status');
 const interaction = $('#interaction');
 const toast = $('#toast');
-const actionMenu = $('#action-menu');
-const actionMenuTitle = $('#action-menu-title');
-const actionBubbles = [...actionMenu.querySelectorAll('[data-action]')];
 const abilitySlots = [...document.querySelectorAll('[data-ability]')];
 const minimap = $('#minimap');
 const minimapContext = minimap.getContext('2d');
 const areaName = $('#area-name');
 const backpackSlots = [...document.querySelectorAll('[data-inventory-slot]')];
 const equippedItem = $('#equipped-item');
-const qualityMode = $('#quality-mode');
 
 const MAX_RENDER_PIXEL_RATIO = 1.25;
 const MAX_RENDER_PIXELS = 1920 * 1080;
@@ -49,9 +45,6 @@ const RESOLUTION_UPSHIFT_MS = 17.2;
 const RESOLUTION_STEP_DOWN = 0.1;
 const RESOLUTION_STEP_UP = 0.05;
 const RESOLUTION_CHANGE_COOLDOWN = 1.5;
-const AUTO_BLOB_SCALE_THRESHOLD = 0.75;
-const AUTO_BLOB_SLOW_SAMPLES = 2;
-const AUTO_FULL_RECOVERY_SAMPLES = 6;
 const MAX_BLOB_SHADOWS = 64;
 const ROOM_ENTRY_CLEARANCE = 1.1;
 const DISTANT_ANIMATION_INTERVAL = 0.1;
@@ -65,6 +58,40 @@ const ACTIONS = {
   freeze: { cooldown: 7.5, range: 8.5 },
   heal: { cooldown: 14, range: 0 },
   buff: { cooldown: 18, range: 0 },
+};
+
+const ACTION_NAMES = {
+  sword: 'Sword',
+  fire: 'Fire',
+  freeze: 'Frostbolt',
+  heal: 'Heal',
+  buff: 'Ward',
+};
+
+const ACTION_BAR_KEYS = {
+  sword: ['Digit1', 'Numpad1'],
+  fire: ['Digit2', 'Numpad2'],
+  freeze: ['Digit3', 'Numpad3'],
+  heal: ['Digit4', 'Numpad4'],
+  buff: ['Digit5', 'Numpad5'],
+};
+
+const ACTION_BY_KEY = new Map(
+  Object.entries(ACTION_BAR_KEYS).flatMap(([action, codes]) => codes.map((code) => [code, action])),
+);
+
+const SPELL_COLORS = {
+  fire: 0xff7a2a,
+  freeze: 0x9fd8f0,
+  heal: 0x8ed9a8,
+  buff: 0xc9a6ff,
+};
+
+const SPELL_CAST_TIMES = {
+  fire: 0.32,
+  freeze: 0.48,
+  heal: 0.44,
+  buff: 0.36,
 };
 
 const ITEM_DEFS = {
@@ -100,7 +127,7 @@ const ITEM_DEFS = {
     rarity: 'rare',
     glyph: '❄',
     color: '#87c8e8',
-    description: 'Freeze cooldown -25%.',
+    description: 'Frostbolt cooldown -25%.',
     cooldown: { freeze: 0.75 },
   },
   wardenRelic: {
@@ -330,10 +357,6 @@ const state = {
   frameSampleFrames: 0,
   resolutionCooldown: 0,
   fastFrameSamples: 0,
-  autoBlobSlowSamples: 0,
-  autoFullRecoverySamples: 0,
-  shadowPreference: 'auto',
-  lowQualityShadows: false,
 };
 
 const keys = new Set();
@@ -341,6 +364,8 @@ const assets = new Map();
 const enemies = [];
 const staticColliders = [];
 const effects = [];
+const spellProjectiles = [];
+const spellVisuals = [];
 const telegraphs = [];
 const combatTexts = [];
 const lootDrops = [];
@@ -370,8 +395,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(rendererPixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.18;
@@ -400,15 +424,23 @@ const tempSize = new THREE.Vector3();
 const raycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
 const projectedAnchor = new THREE.Vector3();
+const spellOrigin = new THREE.Vector3();
+const spellTarget = new THREE.Vector3();
+const movementDirection = new THREE.Vector3();
+const cameraForward = new THREE.Vector3();
+const cameraRight = new THREE.Vector3();
+const worldUp = new THREE.Vector3(0, 1, 0);
 
 let player;
 let toastTimeout;
 let pointerPress = null;
-let actionTarget = null;
+let selectedTarget = null;
 let audioContext = null;
 let noiseBuffer = null;
 let moonLight = null;
 let blobShadowMesh = null;
+let wardVisual = null;
+let targetMarker = null;
 
 const blobShadowPosition = new THREE.Vector3();
 const blobShadowScale = new THREE.Vector3();
@@ -480,9 +512,31 @@ function playSfx(name) {
   } else if (name === 'fire') {
     playNoise({ duration: 0.2, gain: 0.025, frequency: 1400 });
     playTone({ frequency: 180, endFrequency: 420, duration: 0.18, gain: 0.026, type: 'sawtooth' });
+  } else if (name === 'cast-fire') {
+    playTone({ frequency: 180, endFrequency: 520, duration: 0.24, gain: 0.018, type: 'sawtooth' });
+  } else if (name === 'fire-launch') {
+    playNoise({ duration: 0.08, gain: 0.018, frequency: 1800 });
+  } else if (name === 'fire-impact') {
+    playNoise({ duration: 0.16, gain: 0.03, frequency: 1200 });
+    playTone({ frequency: 260, endFrequency: 90, duration: 0.18, gain: 0.022, type: 'triangle' });
   } else if (name === 'freeze') {
     playTone({ frequency: 740, endFrequency: 290, duration: 0.28, gain: 0.026, type: 'sine' });
     playTone({ frequency: 980, endFrequency: 520, duration: 0.2, gain: 0.014, type: 'triangle' });
+  } else if (name === 'cast-freeze') {
+    playTone({ frequency: 420, endFrequency: 980, duration: 0.3, gain: 0.018, type: 'sine' });
+  } else if (name === 'frost-launch') {
+    playTone({ frequency: 960, endFrequency: 620, duration: 0.12, gain: 0.014, type: 'triangle' });
+  } else if (name === 'frost-impact') {
+    playTone({ frequency: 1080, endFrequency: 260, duration: 0.24, gain: 0.022, type: 'sine' });
+    playNoise({ duration: 0.1, gain: 0.018, frequency: 2400 });
+  } else if (name === 'cast-heal') {
+    playTone({ frequency: 260, endFrequency: 640, duration: 0.32, gain: 0.018, type: 'sine' });
+  } else if (name === 'heal-impact') {
+    playTone({ frequency: 520, endFrequency: 860, duration: 0.24, gain: 0.02, type: 'sine' });
+  } else if (name === 'cast-buff') {
+    playTone({ frequency: 220, endFrequency: 740, duration: 0.28, gain: 0.018, type: 'triangle' });
+  } else if (name === 'ward-impact') {
+    playTone({ frequency: 360, endFrequency: 180, duration: 0.24, gain: 0.022, type: 'triangle' });
   } else if (name === 'hurt') {
     playNoise({ duration: 0.13, gain: 0.045, frequency: 520 });
     playTone({ frequency: 120, endFrequency: 70, duration: 0.16, gain: 0.03, type: 'square' });
@@ -504,7 +558,7 @@ function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
 }
 
-function setShadows(object, { cast = true, receive = true } = {}) {
+function setShadows(object, { cast = false, receive = false } = {}) {
   object.traverse((child) => {
     if (!child.isMesh) return;
     child.castShadow = cast;
@@ -548,6 +602,33 @@ function findClip(clips, patterns) {
     const name = clip.name.toLowerCase();
     return wanted.some((pattern) => name.includes(pattern));
   });
+}
+
+function cloneAbilityClip(clips, name, sourcePatterns, speed = 1) {
+  const source = findClip(clips, sourcePatterns);
+  if (!source) return null;
+  const clip = source.clone();
+  clip.name = name;
+  if (speed !== 1) {
+    clip.tracks = clip.tracks.map((track) => {
+      const next = track.clone();
+      next.times = Float32Array.from(track.times, (time) => time / speed);
+      return next;
+    });
+    clip.resetDuration();
+  }
+  return clip;
+}
+
+function createAbilityClips(clips) {
+  // ClaudeCraft uses these school-level names. We derive the same small set
+  // from the local CC0 rig so the demo keeps its own asset provenance.
+  return [
+    cloneAbilityClip(clips, 'Cast_Fire', ['spellcast_shoot'], 2.9),
+    cloneAbilityClip(clips, 'Cast_Frost', ['spellcast_raise'], 4.3),
+    cloneAbilityClip(clips, 'Cast_Arcane', ['spellcasting'], 1.85),
+    cloneAbilityClip(clips, 'Cast_Heal', ['spellcast_raise'], 4.8),
+  ].filter(Boolean);
 }
 
 function attachEquipment(visual, assetKey, boneName, { scale = 1, position = [0, 0, 0], rotation = [0, 0, 0] } = {}) {
@@ -621,7 +702,8 @@ class Actor {
     scene.add(this.root);
 
     this.mixer = new THREE.AnimationMixer(this.visual);
-    this.clips = source.animations ?? [];
+    this.clips = [...(source.animations ?? [])];
+    if (type === 'player') this.clips.push(...createAbilityClips(this.clips));
     this.actions = new Map();
     this.currentAction = null;
     this.currentClipName = '';
@@ -754,7 +836,7 @@ function createStatic(assetKey, {
   colliderWidth = 0,
   colliderDepth = 0,
   castShadow = false,
-  receiveShadow = true,
+  receiveShadow = false,
   parent = null,
 } = {}) {
   const source = assets.get(assetKey);
@@ -805,7 +887,7 @@ function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
   visual.position.y -= tempBox.min.y;
   visual.position.z -= center.z;
   visual.updateMatrixWorld(true);
-  setShadows(visual, { cast: false, receive: true });
+  setShadows(visual);
 
   root.add(visual);
   root.position.set(x, 0, z);
@@ -851,7 +933,7 @@ function createFloorTiles(placements) {
     const tiles = new THREE.InstancedMesh(child.geometry, child.material, placements.length);
     tiles.name = 'instanced-floor-tiles';
     tiles.castShadow = false;
-    tiles.receiveShadow = true;
+    tiles.receiveShadow = false;
     placements.forEach(({ x, z }, index) => {
       translation.makeTranslation(x, 0, z);
       instanceMatrix.multiplyMatrices(translation, child.matrixWorld);
@@ -879,7 +961,7 @@ function addBox({
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
   mesh.position.set(x, y, z);
   mesh.castShadow = castShadow;
-  mesh.receiveShadow = true;
+  mesh.receiveShadow = false;
   addWorldObject(mesh, parent);
   if (colliderWidth > 0 && colliderDepth > 0) {
     const collider = {
@@ -906,55 +988,8 @@ function buildLighting() {
   scene.add(new THREE.HemisphereLight(0x8886b3, 0x17131b, 1.7));
   moonLight = new THREE.DirectionalLight(0xc8c9ff, 2.1);
   moonLight.position.set(-5, 12, 7);
-  moonLight.castShadow = !state.lowQualityShadows;
-  moonLight.shadow.mapSize.set(1024, 1024);
-  moonLight.shadow.camera.left = -26;
-  moonLight.shadow.camera.right = 26;
-  moonLight.shadow.camera.top = 24;
-  moonLight.shadow.camera.bottom = -24;
-  moonLight.shadow.camera.near = 0.5;
-  moonLight.shadow.camera.far = 40;
-  moonLight.shadow.bias = -0.0008;
-  moonLight.shadow.normalBias = 0.02;
+  moonLight.castShadow = false;
   scene.add(moonLight, moonLight.target);
-}
-
-function updateQualityReadout() {
-  const preference = state.shadowPreference === 'auto'
-    ? `Auto · ${state.lowQualityShadows ? 'Blob' : 'Full'}`
-    : state.shadowPreference === 'low' ? 'Blob shadows' : 'Full shadows';
-  qualityMode.textContent = `${preference} · ${Math.round(state.resolutionScale * 100)}%`;
-}
-
-function setLowQualityShadows(enabled, { notify = false } = {}) {
-  if (state.lowQualityShadows === enabled) return;
-  state.lowQualityShadows = enabled;
-  if (moonLight) moonLight.castShadow = !enabled;
-  if (blobShadowMesh) blobShadowMesh.visible = enabled;
-  renderer.shadowMap.needsUpdate = true;
-  updateQualityReadout();
-  if (notify && state.loaded) {
-    setToast(enabled
-      ? 'Performance mode enabled: using lightweight blob shadows.'
-      : 'Full directional shadows restored.');
-  }
-}
-
-function cycleShadowPreference() {
-  const preferences = ['auto', 'low', 'high'];
-  const currentIndex = preferences.indexOf(state.shadowPreference);
-  state.shadowPreference = preferences[(currentIndex + 1) % preferences.length];
-  state.autoBlobSlowSamples = 0;
-  state.autoFullRecoverySamples = 0;
-  if (state.shadowPreference === 'low') {
-    setLowQualityShadows(true);
-  } else if (state.shadowPreference === 'high') {
-    setLowQualityShadows(false);
-  } else {
-    setLowQualityShadows(state.resolutionScale <= AUTO_BLOB_SCALE_THRESHOLD);
-  }
-  updateQualityReadout();
-  setToast(`Shadow quality: ${qualityMode.textContent}.`);
 }
 
 function resetFrameSample() {
@@ -968,7 +1003,6 @@ function applyAdaptiveResolutionScale(nextScale) {
   state.resolutionScale = clamped;
   renderer.setPixelRatio(rendererPixelRatio());
   state.resolutionCooldown = RESOLUTION_CHANGE_COOLDOWN;
-  updateQualityReadout();
 }
 
 function updateAdaptiveQuality(frameDelta) {
@@ -997,27 +1031,6 @@ function updateAdaptiveQuality(frameDelta) {
       state.fastFrameSamples = 0;
     }
   }
-
-  if (state.shadowPreference !== 'auto') return;
-  if (!state.lowQualityShadows) {
-    state.autoBlobSlowSamples = state.resolutionScale <= AUTO_BLOB_SCALE_THRESHOLD
-      && averageFrameMs > RESOLUTION_DOWNSHIFT_MS
-      ? state.autoBlobSlowSamples + 1
-      : 0;
-    if (state.autoBlobSlowSamples >= AUTO_BLOB_SLOW_SAMPLES) {
-      state.autoBlobSlowSamples = 0;
-      setLowQualityShadows(true, { notify: true });
-    }
-  } else {
-    state.autoFullRecoverySamples = state.resolutionScale >= 0.9
-      && averageFrameMs < RESOLUTION_UPSHIFT_MS
-      ? state.autoFullRecoverySamples + 1
-      : 0;
-    if (state.autoFullRecoverySamples >= AUTO_FULL_RECOVERY_SAMPLES) {
-      state.autoFullRecoverySamples = 0;
-      setLowQualityShadows(false, { notify: true });
-    }
-  }
 }
 
 function buildBlobShadows() {
@@ -1033,7 +1046,7 @@ function buildBlobShadows() {
   blobShadowMesh = new THREE.InstancedMesh(geometry, material, MAX_BLOB_SHADOWS);
   blobShadowMesh.name = 'blob-shadows';
   blobShadowMesh.count = 0;
-  blobShadowMesh.visible = state.lowQualityShadows;
+  blobShadowMesh.visible = true;
   blobShadowMesh.frustumCulled = false;
   blobShadowMesh.renderOrder = 1;
   blobShadowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -1282,7 +1295,7 @@ function buildCrypt() {
   underfloor.position.y = -0.08;
   underfloor.position.x = (WORLD.minX + WORLD.maxX) / 2;
   underfloor.position.z = (WORLD.minZ + WORLD.maxZ) / 2;
-  underfloor.receiveShadow = true;
+  underfloor.receiveShadow = false;
   scene.add(underfloor);
 
   const grid = new THREE.GridHelper(120, 60, 0x525168, 0x292a3a);
@@ -1394,8 +1407,123 @@ function moveGateAssemblyToRoom(gate, roomId) {
   const offsetZ = nextPosition.z - gate.position.z;
   if (Math.abs(offsetX) + Math.abs(offsetZ) < 0.001) return;
   shiftStaticObject(gate.root, offsetX, offsetZ);
-  gate.wallRoots.forEach((root) => shiftStaticObject(root, offsetX, offsetZ));
   gate.position.set(nextPosition.x, 0, nextPosition.z);
+}
+
+function setGateWallFrameVisible(gate, roomId, visible) {
+  gate.wallFrames.get(roomId)?.forEach((root) => {
+    root.visible = visible;
+  });
+}
+
+function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wallMaterial }) {
+  const { x, z } = gateWallPosition(corridor, roomId, travelsAlongZ);
+  const wallThickness = 0.5;
+  const parent = zoneRenderGroups.get(corridor.id);
+  const wallRoots = [];
+
+  if (travelsAlongZ) {
+    const wallSections = [
+      [corridor.minX, x - openingWidth / 2],
+      [x + openingWidth / 2, corridor.maxX],
+    ];
+    for (const [startX, endX] of wallSections) {
+      const sideWidth = endX - startX;
+      wallRoots.push(addBox({
+        x: (startX + endX) / 2,
+        y: 1.35,
+        z,
+        width: sideWidth,
+        height: 2.7,
+        depth: wallThickness,
+        material: wallMaterial,
+        colliderWidth: sideWidth,
+        colliderDepth: wallThickness,
+        parent,
+      }));
+    }
+  } else {
+    const wallSections = [
+      [corridor.minZ, z - openingWidth / 2],
+      [z + openingWidth / 2, corridor.maxZ],
+    ];
+    for (const [startZ, endZ] of wallSections) {
+      const sideWidth = endZ - startZ;
+      wallRoots.push(addBox({
+        x,
+        y: 1.35,
+        z: (startZ + endZ) / 2,
+        width: wallThickness,
+        height: 2.7,
+        depth: sideWidth,
+        material: wallMaterial,
+        colliderWidth: wallThickness,
+        colliderDepth: sideWidth,
+        parent,
+      }));
+    }
+  }
+
+  return wallRoots;
+}
+
+function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth, wallMaterial }) {
+  const corridorX = (corridor.minX + corridor.maxX) / 2;
+  const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
+  const endpointPositions = roomIds.map((roomId) => gateWallPosition(corridor, roomId, travelsAlongZ));
+  const wallThickness = 0.5;
+  const parent = zoneRenderGroups.get(corridor.id);
+  const wallRoots = [];
+
+  if (travelsAlongZ) {
+    const minZ = Math.min(...endpointPositions.map(({ z }) => z));
+    const maxZ = Math.max(...endpointPositions.map(({ z }) => z));
+    const wallDepth = maxZ - minZ + wallThickness;
+    const wallSections = [
+      [corridor.minX, corridorX - openingWidth / 2],
+      [corridorX + openingWidth / 2, corridor.maxX],
+    ];
+    for (const [startX, endX] of wallSections) {
+      const sideWidth = endX - startX;
+      wallRoots.push(addBox({
+        x: (startX + endX) / 2,
+        y: 1.35,
+        z: (minZ + maxZ) / 2,
+        width: sideWidth,
+        height: 2.7,
+        depth: wallDepth,
+        material: wallMaterial,
+        colliderWidth: sideWidth,
+        colliderDepth: wallDepth,
+        parent,
+      }));
+    }
+  } else {
+    const minX = Math.min(...endpointPositions.map(({ x }) => x));
+    const maxX = Math.max(...endpointPositions.map(({ x }) => x));
+    const wallWidth = maxX - minX + wallThickness;
+    const wallSections = [
+      [corridor.minZ, corridorZ - openingWidth / 2],
+      [corridorZ + openingWidth / 2, corridor.maxZ],
+    ];
+    for (const [startZ, endZ] of wallSections) {
+      const sideWidth = endZ - startZ;
+      wallRoots.push(addBox({
+        x: (minX + maxX) / 2,
+        y: 1.35,
+        z: (startZ + endZ) / 2,
+        width: wallWidth,
+        height: 2.7,
+        depth: sideWidth,
+        material: wallMaterial,
+        colliderWidth: wallWidth,
+        colliderDepth: sideWidth,
+        parent,
+      }));
+    }
+  }
+
+  return wallRoots;
 }
 
 function buildGates(wallMaterial) {
@@ -1409,57 +1537,31 @@ function buildGates(wallMaterial) {
     const connectedRoomCenters = roomIds.map((id) => roomCenter(ZONE_BY_ID.get(id)));
     const travelsAlongZ = Math.abs(connectedRoomCenters[1].z - connectedRoomCenters[0].z)
       > Math.abs(connectedRoomCenters[1].x - connectedRoomCenters[0].x);
-    // MAP room order follows progression, so mount the assembly on the wall
-    // of the first connected room until the player opens it.
+    // MAP room order follows progression, so mount the gate on the wall of the
+    // first connected room until the player opens it.
     const { x, z } = gateWallPosition(corridor, roomIds[0], travelsAlongZ);
     const span = travelsAlongZ ? width : depth;
     const openingWidth = Math.min(3.6, span - 1.2);
-    const gateWallOverlap = 0.45;
-    const wallThickness = 0.5;
     const parent = zoneRenderGroups.get(corridor.id);
-    const wallRoots = [];
-
-    if (travelsAlongZ) {
-      const wallSections = [
-        [corridor.minX, x - openingWidth / 2 + gateWallOverlap],
-        [x + openingWidth / 2 - gateWallOverlap, corridor.maxX],
-      ];
-      for (const [startX, endX] of wallSections) {
-        const sideWidth = endX - startX;
-        wallRoots.push(addBox({
-          x: (startX + endX) / 2,
-          y: 1.35,
-          z,
-          width: sideWidth,
-          height: 2.7,
-          depth: wallThickness,
-          material: wallMaterial,
-          colliderWidth: sideWidth,
-          colliderDepth: wallThickness,
-          parent,
-        }));
-      }
-    } else {
-      const wallSections = [
-        [corridor.minZ, z - openingWidth / 2 + gateWallOverlap],
-        [z + openingWidth / 2 - gateWallOverlap, corridor.maxZ],
-      ];
-      for (const [startZ, endZ] of wallSections) {
-        const sideWidth = endZ - startZ;
-        wallRoots.push(addBox({
-          x,
-          y: 1.35,
-          z: (startZ + endZ) / 2,
-          width: wallThickness,
-          height: 2.7,
-          depth: sideWidth,
-          material: wallMaterial,
-          colliderWidth: wallThickness,
-          colliderDepth: sideWidth,
-          parent,
-        }));
-      }
-    }
+    // Bridge the two room wall planes along the corridor so the side walls do
+    // not leave a visible strip of corridor tiles between the sections.
+    buildGateCorridorWalls({
+      corridor,
+      roomIds,
+      travelsAlongZ,
+      openingWidth,
+      wallMaterial,
+    });
+    const wallFrames = new Map(roomIds.map((roomId) => [roomId, buildGateWallFrame({
+      corridor,
+      roomId,
+      travelsAlongZ,
+      openingWidth,
+      wallMaterial,
+    })]));
+    wallFrames.get(roomIds[1]).forEach((root) => {
+      root.visible = false;
+    });
 
     const root = createGateStatic({
       x,
@@ -1476,7 +1578,7 @@ function buildGates(wallMaterial) {
       travelsAlongZ,
       position: new THREE.Vector3(x, 0, z),
       root,
-      wallRoots,
+      wallFrames,
       open: false,
       fromRoomId: null,
       toRoomId: null,
@@ -1525,12 +1627,12 @@ function buildActors() {
   ];
   for (const [name, x, z, profileKey, roomId] of enemySpawns) {
     const profileStats = profileKey === 'rusher'
-      ? { maxHp: 26, speed: 1.18 }
+      ? { maxHp: 400, speed: 1.18 }
       : profileKey === 'pulser'
-        ? { maxHp: 34, speed: 0.9 }
+        ? { maxHp: 600, speed: 0.9 }
         : profileKey === 'support'
-          ? { maxHp: 32, speed: 0.92 }
-          : { maxHp: 30, speed: 1.05 };
+          ? { maxHp: 550, speed: 0.92 }
+          : { maxHp: 500, speed: 1.05 };
     enemies.push(spawnActor({
       assetKey: 'skeletonWarrior',
       type: 'enemy',
@@ -1550,7 +1652,7 @@ function buildActors() {
     x: 0,
     z: -40,
     height: 2.2,
-    maxHp: 120,
+    maxHp: 2000,
     speed: 0.72,
     profileKey: 'warden',
     roomId: 'wardenKeep',
@@ -1666,6 +1768,11 @@ function updateProgression() {
   if (traversedGate) {
     traversedGate.open = false;
     traversedGate.root.visible = true;
+    // Keep both doorway frames in place. The room wall has a four-tile
+    // corridor opening; the frame sections narrow it back to the two-tile gate
+    // opening even while the gate itself is open on the other side.
+    setGateWallFrameVisible(traversedGate, previousRoomId, true);
+    setGateWallFrameVisible(traversedGate, room.id, true);
     traversedGate.fromRoomId = null;
     traversedGate.toRoomId = null;
   }
@@ -1738,49 +1845,60 @@ function pickActor(clientX, clientY) {
   return null;
 }
 
-function closeActionMenu() {
-  actionTarget = null;
-  actionMenu.classList.add('is-hidden');
+function ensureTargetMarker() {
+  if (targetMarker) return;
+  targetMarker = new THREE.Mesh(
+    new THREE.TorusGeometry(0.82, 0.035, 8, 40),
+    new THREE.MeshBasicMaterial({
+      color: 0xd8b5f0,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  targetMarker.name = 'selected-target-marker';
+  targetMarker.rotation.x = Math.PI / 2;
+  targetMarker.visible = false;
+  scene.add(targetMarker);
 }
 
-function updateActionMenuPosition() {
-  if (!actionTarget || state.finished || state.failed || actionTarget.dead) {
-    if (actionTarget) closeActionMenu();
-    return;
-  }
-  projectedAnchor.copy(actionTarget.root.position);
-  projectedAnchor.y += actionTarget.height + 0.35;
-  projectedAnchor.project(camera);
-  if (projectedAnchor.z < -1 || projectedAnchor.z > 1) {
-    closeActionMenu();
-    return;
-  }
-  const menuHalfWidth = actionTarget === player ? 82 : 126;
-  const x = THREE.MathUtils.clamp(
-    (projectedAnchor.x * 0.5 + 0.5) * window.innerWidth,
-    menuHalfWidth,
-    window.innerWidth - menuHalfWidth,
-  );
-  const y = THREE.MathUtils.clamp(
-    (-projectedAnchor.y * 0.5 + 0.5) * window.innerHeight,
-    82,
-    window.innerHeight - 96,
-  );
-  actionMenu.style.left = `${x}px`;
-  actionMenu.style.top = `${y}px`;
+function clearSelectedTarget({ silent = false } = {}) {
+  selectedTarget = null;
+  if (targetMarker) targetMarker.visible = false;
+  if (!silent && state.started) setToast('Target cleared.', 900);
+  updateTargetUi();
+  updateActionUi();
 }
 
-function openActionMenu(target) {
-  if (!state.loaded || state.finished || state.failed || !target || target.dead) return;
+function selectTarget(target) {
+  if (!state.loaded || state.finished || state.failed) return;
+  if (!target || target.dead || (target !== player && !isEnemyAccessible(target))) {
+    clearSelectedTarget({ silent: true });
+    return;
+  }
   state.started = true;
-  actionTarget = target;
-  const isSelf = target === player;
-  actionMenuTitle.textContent = isSelf ? 'SELF ACTIONS' : `${target.name.toUpperCase()} ACTIONS`;
-  actionBubbles.forEach((button) => {
-    button.classList.toggle('is-hidden', button.dataset.scope !== (isSelf ? 'self' : 'enemy'));
-  });
-  actionMenu.classList.remove('is-hidden');
-  updateActionMenuPosition();
+  selectedTarget = target;
+  ensureTargetMarker();
+  targetMarker.visible = target !== player;
+  updateTargetUi();
+  updateActionUi();
+}
+
+function updateTargetMarker(delta = 0) {
+  if (!targetMarker || !selectedTarget || selectedTarget === player || selectedTarget.dead || !isEnemyAccessible(selectedTarget)) {
+    if (targetMarker) targetMarker.visible = false;
+    if (selectedTarget && (selectedTarget.dead || !isEnemyAccessible(selectedTarget))) {
+      clearSelectedTarget({ silent: true });
+    }
+    return;
+  }
+  targetMarker.visible = true;
+  targetMarker.position.copy(selectedTarget.root.position);
+  targetMarker.position.y = 0.055;
+  targetMarker.scale.setScalar(0.86 + Math.sin(state.elapsed * 5.2) * 0.045);
+  targetMarker.rotation.z += delta * 1.8;
+  targetMarker.material.opacity = 0.58 + Math.sin(state.elapsed * 6.5) * 0.1;
 }
 
 function updateHealthUi() {
@@ -1800,8 +1918,12 @@ function updateTargetUi() {
     targetCard.classList.add('is-hidden');
     return;
   }
-  const selectedEnemy = actionTarget && actionTarget !== player && !actionTarget.dead ? actionTarget : null;
-  const target = selectedEnemy ?? nearestLivingEnemy(4.4);
+  const target = selectedTarget
+    && selectedTarget !== player
+    && !selectedTarget.dead
+    && isEnemyAccessible(selectedTarget)
+    ? selectedTarget
+    : null;
   if (!target) {
     targetCard.classList.add('is-hidden');
     return;
@@ -1817,25 +1939,36 @@ function updateTargetUi() {
 }
 
 function updateActionUi() {
-  for (const button of actionBubbles) {
-    const action = button.dataset.action;
+  for (const slot of abilitySlots) {
+    const action = slot.dataset.ability;
     const remaining = state.actionCooldowns[action] ?? 0;
     const total = actionCooldownFor(action);
-    const ratio = total > 0 ? remaining / total : 0;
-    let readout = button.querySelector('.action-cooldown');
-    if (!readout) {
-      readout = document.createElement('span');
-      readout.className = 'action-cooldown';
-      button.append(readout);
-    }
-    readout.textContent = remaining > 0 ? remaining.toFixed(1) : '';
-    button.disabled = remaining > 0;
-    button.style.setProperty('--cooldown-angle', `${ratio * 360}deg`);
-  }
-  for (const slot of abilitySlots) {
-    const remaining = state.actionCooldowns[slot.dataset.ability] ?? 0;
+    const target = selectedTarget
+      && selectedTarget !== player
+      && !selectedTarget.dead
+      && isEnemyAccessible(selectedTarget)
+      ? selectedTarget
+      : null;
+    const needsTarget = action !== 'heal' && action !== 'buff';
+    const outOfRange = target && needsTarget
+      ? player.root.position.distanceTo(target.root.position) > ACTIONS[action].range
+      : false;
+    const blocked = (needsTarget && (!target || outOfRange))
+      || (action === 'heal' && state.playerHp >= state.playerMaxHp);
     slot.classList.toggle('is-cooling', remaining > 0);
+    slot.classList.toggle('is-unusable', blocked);
+    slot.classList.toggle('is-casting', player?.pendingAction === action);
     slot.querySelector('strong').textContent = remaining > 0 ? `${remaining.toFixed(1)}s` : 'READY';
+    const targetHint = needsTarget
+      ? !target
+        ? ' Select an enemy target first.'
+        : outOfRange
+          ? ' Target is out of range.'
+          : ''
+      : action === 'heal' && state.playerHp >= state.playerMaxHp
+        ? ' Vitality is already full.'
+        : '';
+    slot.setAttribute('aria-label', `${ACTION_NAMES[action]}. Press ${slot.dataset.key}.${targetHint}`);
   }
 }
 
@@ -1921,7 +2054,7 @@ function createLootVisual(itemId, position) {
     roughness: 0.35,
     metalness: item.kind === 'equipment' ? 0.65 : 0.18,
   }));
-  core.castShadow = true;
+  core.castShadow = false;
   root.add(core);
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(0.34, 0.025, 8, 28),
@@ -2043,6 +2176,8 @@ function openGate(gate) {
   for (const otherGate of state.gates) {
     if (!otherGate.open) continue;
     moveGateAssemblyToRoom(otherGate, otherGate.fromRoomId);
+    setGateWallFrameVisible(otherGate, otherGate.fromRoomId, true);
+    setGateWallFrameVisible(otherGate, otherGate.toRoomId, false);
     otherGate.open = false;
     otherGate.root.visible = true;
     otherGate.fromRoomId = null;
@@ -2051,6 +2186,8 @@ function openGate(gate) {
   gate.open = true;
   gate.fromRoomId = state.currentRoomId;
   gate.toRoomId = gate.roomIds.find((id) => id !== state.currentRoomId) ?? null;
+  setGateWallFrameVisible(gate, gate.fromRoomId, true);
+  setGateWallFrameVisible(gate, gate.toRoomId, true);
   moveGateAssemblyToRoom(gate, gate.toRoomId);
   gate.root.visible = false;
   updateZoneVisibility(state.currentRoomId, true);
@@ -2168,6 +2305,289 @@ function spawnBurst(position, color = 0xf0c071, count = 12) {
   }
 }
 
+function spellMaterial(color, opacity = 0.8) {
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  material.userData.baseOpacity = opacity;
+  return material;
+}
+
+function createSpellRing(color, radius = 0.55, thickness = 0.035) {
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(radius, thickness, 8, 36),
+    spellMaterial(color, 0.8),
+  );
+  ring.rotation.x = Math.PI / 2;
+  return ring;
+}
+
+function setVisualOpacity(root, opacity) {
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (material?.transparent) material.opacity = (material.userData.baseOpacity ?? 1) * opacity;
+    }
+  });
+}
+
+function disposeVisual(root) {
+  if (!root) return;
+  root.parent?.remove(root);
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    child.geometry?.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => material?.dispose());
+  });
+}
+
+function spellCastLabel(action) {
+  return action === 'fire'
+    ? 'CAST FIRE'
+    : action === 'freeze'
+      ? 'CAST FROST'
+      : action === 'heal'
+        ? 'CAST HEAL'
+        : 'RAISE WARD';
+}
+
+function spawnSpellCharge(action) {
+  const color = SPELL_COLORS[action];
+  const root = new THREE.Group();
+  root.name = `spell-charge-${action}`;
+  root.position.set(0, 1.14, 0.48);
+  const ring = createSpellRing(color, action === 'heal' ? 0.5 : 0.42, 0.035);
+  root.add(ring);
+  const orb = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(action === 'heal' ? 0.13 : 0.16, 1),
+    spellMaterial(color, 0.9),
+  );
+  orb.position.y = 0.08;
+  root.add(orb);
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(action === 'heal' ? 0.25 : 0.3, 12, 8),
+    spellMaterial(color, 0.14),
+  );
+  halo.position.y = 0.08;
+  root.add(halo);
+  if (action === 'freeze') {
+    const frostRing = createSpellRing(0xdaf5ff, 0.28, 0.022);
+    frostRing.rotation.y = Math.PI / 2;
+    root.add(frostRing);
+  }
+  if (action === 'heal') {
+    const liftRing = createSpellRing(0xc6f5d5, 0.28, 0.022);
+    liftRing.position.y = 0.32;
+    root.add(liftRing);
+  }
+  player.root.add(root);
+  spellVisuals.push({
+    kind: 'charge',
+    action,
+    root,
+    life: SPELL_CAST_TIMES[action],
+    maxLife: SPELL_CAST_TIMES[action],
+  });
+  playSfx(`cast-${action}`);
+  if (action !== 'buff') {
+    spawnCombatText(player.root.position, spellCastLabel(action), `#${new THREE.Color(color).getHexString()}`, player.height + 0.18);
+  }
+}
+
+function createSpellProjectile(action) {
+  const color = SPELL_COLORS[action];
+  const root = new THREE.Group();
+  root.name = `spell-projectile-${action}`;
+  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(action === 'fire' ? 0.16 : 0.14, 1), spellMaterial(color, 0.95));
+  root.add(core);
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(action === 'fire' ? 0.32 : 0.27, 12, 8), spellMaterial(color, 0.16));
+  root.add(halo);
+  const ring = createSpellRing(action === 'fire' ? 0xffd27a : 0xdaf5ff, action === 'fire' ? 0.24 : 0.2, 0.025);
+  ring.rotation.y = Math.PI / 2;
+  root.add(ring);
+  for (let index = 0; index < 3; index += 1) {
+    const tail = new THREE.Mesh(
+      new THREE.SphereGeometry(action === 'fire' ? 0.07 : 0.055, 8, 6),
+      spellMaterial(color, 0.32 - index * 0.07),
+    );
+    tail.position.z = 0.18 + index * 0.14;
+    tail.scale.setScalar(1 - index * 0.18);
+    root.add(tail);
+  }
+  return root;
+}
+
+function spellTargetPosition(target) {
+  return spellTarget.copy(target.root.position).setY(target.root.position.y + target.height * 0.56).clone();
+}
+
+function spawnSpellProjectile(action, target) {
+  if (!target || target.dead) return;
+  spellOrigin.set(0, 1.14, 0.66);
+  player.root.localToWorld(spellOrigin);
+  const destination = spellTargetPosition(target);
+  const distance = spellOrigin.distanceTo(destination);
+  const speed = action === 'fire' ? 18 : 15;
+  const root = createSpellProjectile(action);
+  root.position.copy(spellOrigin);
+  scene.add(root);
+  spellProjectiles.push({
+    action,
+    root,
+    target,
+    start: spellOrigin.clone(),
+    destination,
+    duration: THREE.MathUtils.clamp(distance / speed, 0.22, 0.58),
+    life: 0,
+  });
+  playSfx(action === 'fire' ? 'fire-launch' : 'frost-launch');
+}
+
+function spawnSpellImpact(action, position) {
+  const color = SPELL_COLORS[action];
+  const root = new THREE.Group();
+  root.name = `spell-impact-${action}`;
+  root.position.copy(position);
+  root.position.y += 0.045;
+  const ring = createSpellRing(color, action === 'freeze' ? 0.42 : 0.34, 0.045);
+  root.add(ring);
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(action === 'freeze' ? 0.22 : 0.25, 12, 8),
+    spellMaterial(color, 0.32),
+  );
+  flash.position.y = 0.58;
+  root.add(flash);
+  if (action === 'freeze') {
+    for (let index = 0; index < 6; index += 1) {
+      const shard = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.36, 5), spellMaterial(0xdaf5ff, 0.78));
+      const angle = (index / 6) * Math.PI * 2;
+      shard.position.set(Math.cos(angle) * 0.35, 0.22, Math.sin(angle) * 0.35);
+      shard.rotation.z = Math.cos(angle) * 0.7;
+      shard.rotation.x = Math.sin(angle) * 0.7;
+      root.add(shard);
+    }
+  }
+  scene.add(root);
+  spellVisuals.push({ kind: 'impact', action, root, life: 0.46, maxLife: 0.46 });
+  spawnBurst(position, color, action === 'freeze' ? 18 : 16);
+  playSfx(action === 'fire' ? 'fire-impact' : action === 'freeze' ? 'frost-impact' : action === 'buff' ? 'ward-impact' : 'heal-impact');
+  addCameraFeedback(action === 'freeze' ? 0.1 : 0.075, action === 'freeze' ? 1.1 : 0.8);
+}
+
+function clearWardVisual() {
+  if (!wardVisual) return;
+  disposeVisual(wardVisual.root);
+  wardVisual = null;
+}
+
+function activateWardVisual() {
+  clearWardVisual();
+  const root = new THREE.Group();
+  root.name = 'ward-shell';
+  root.position.y = 1.02;
+  const shell = new THREE.Mesh(
+    new THREE.SphereGeometry(0.9, 20, 14),
+    new THREE.MeshBasicMaterial({
+      color: SPELL_COLORS.buff,
+      transparent: true,
+      opacity: 0.12,
+      wireframe: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  shell.material.userData.baseOpacity = 0.12;
+  root.add(shell);
+  root.add(createSpellRing(SPELL_COLORS.buff, 0.86, 0.035));
+  const orbit = new THREE.Group();
+  root.add(orbit);
+  for (let index = 0; index < 6; index += 1) {
+    const plate = new THREE.Mesh(new THREE.OctahedronGeometry(0.13, 0), spellMaterial(0xe7d8ff, 0.52));
+    const angle = (index / 6) * Math.PI * 2;
+    plate.position.set(Math.cos(angle) * 0.82, Math.sin(angle * 2) * 0.13, Math.sin(angle) * 0.82);
+    plate.scale.set(1, 1.7, 0.34);
+    orbit.add(plate);
+  }
+  player.root.add(root);
+  wardVisual = { root, orbit, phase: 0 };
+  spawnSpellImpact('buff', player.root.position);
+}
+
+function updateSpellProjectiles(delta) {
+  for (let index = spellProjectiles.length - 1; index >= 0; index -= 1) {
+    const projectile = spellProjectiles[index];
+    projectile.life += delta;
+    const progress = THREE.MathUtils.clamp(projectile.life / projectile.duration, 0, 1);
+    const destination = projectile.target && !projectile.target.dead
+      ? spellTargetPosition(projectile.target)
+      : projectile.destination;
+    projectile.root.position.lerpVectors(projectile.start, destination, progress);
+    projectile.root.lookAt(destination);
+    const pulse = 0.9 + Math.sin(projectile.life * 28) * 0.1;
+    projectile.root.scale.setScalar(pulse);
+    if (progress >= 1) {
+      disposeVisual(projectile.root);
+      spellProjectiles.splice(index, 1);
+      const target = projectile.target;
+      const impactPosition = target && !target.dead ? target.root.position.clone() : destination.clone();
+      spawnSpellImpact(projectile.action, impactPosition);
+      if (target && !target.dead) {
+        if (projectile.action === 'freeze') {
+          const damage = playerDamage(target.profileKey === 'warden' ? 7 : 10, 'freeze');
+          target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
+          target.attackPending = false;
+          target.pendingEnemyAttack = null;
+          applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
+          spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
+        } else {
+          const damage = playerDamage(target.profileKey === 'warden' ? 12 : 17, 'fire');
+          applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
+        }
+      }
+    }
+  }
+}
+
+function updateSpellVisuals(delta) {
+  for (let index = spellVisuals.length - 1; index >= 0; index -= 1) {
+    const visual = spellVisuals[index];
+    visual.life -= delta;
+    const progress = THREE.MathUtils.clamp(1 - visual.life / visual.maxLife, 0, 1);
+    if (visual.kind === 'charge') {
+      visual.root.rotation.y += delta * 2.8;
+      visual.root.scale.setScalar(0.86 + Math.sin(progress * Math.PI) * 0.18);
+      setVisualOpacity(visual.root, Math.min(1, 0.25 + (1 - progress) * 0.75));
+    } else {
+      visual.root.rotation.y += delta * 1.6;
+      visual.root.scale.setScalar(0.55 + progress * 1.8);
+      setVisualOpacity(visual.root, Math.max(0, 1 - progress));
+    }
+    if (visual.life <= 0) {
+      disposeVisual(visual.root);
+      spellVisuals.splice(index, 1);
+    }
+  }
+}
+
+function updateWardVisual(delta) {
+  if (!wardVisual) return;
+  if (state.playerBuffTimer <= 0 || state.finished || state.failed) {
+    clearWardVisual();
+    return;
+  }
+  wardVisual.phase += delta;
+  wardVisual.orbit.rotation.y = wardVisual.phase * 0.8;
+  const pulse = 1 + Math.sin(wardVisual.phase * 5) * 0.035;
+  wardVisual.root.scale.setScalar(pulse);
+  setVisualOpacity(wardVisual.root, 0.92 + Math.min(0.18, state.playerBuffTimer / 40));
+}
+
 function spawnCombatText(position, text, color = '#f3d093', height = 1.55) {
   const element = document.createElement('div');
   element.className = 'combat-text';
@@ -2221,6 +2641,7 @@ function updateEnemyNameplates() {
     nameplate.element.classList.toggle('is-hidden', !visible);
     if (!visible) continue;
     nameplate.element.classList.toggle('is-alerted', enemy.awake && state.combatStarted && !enemy.evading);
+    nameplate.element.classList.toggle('is-selected', selectedTarget === enemy);
     nameplate.element.style.left = `${x}px`;
     nameplate.element.style.top = `${y}px`;
     nameplate.healthFill.style.width = `${Math.max(0, enemy.hp / enemy.maxHp) * 100}%`;
@@ -2317,6 +2738,10 @@ function applyPlayerAction() {
   const target = player.attackTarget;
   player.pendingAction = null;
   player.attackTarget = null;
+  if (action === 'heal' || action === 'buff') {
+    applySelfAction(action);
+    return;
+  }
   if (!target || target.dead) return;
 
   const distance = player.root.position.distanceTo(target.root.position);
@@ -2325,17 +2750,9 @@ function applyPlayerAction() {
     playSfx('sword');
     applyEnemyDamage(target, damage, 0xe9b36f, `${target.name} takes ${damage} damage.`);
   } else if (action === 'fire' && distance <= 8.5) {
-    const damage = playerDamage(target.profileKey === 'warden' ? 12 : 17, action);
-    playSfx('fire');
-    applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
+    spawnSpellProjectile('fire', target);
   } else if (action === 'freeze' && distance <= 8.5) {
-    const damage = playerDamage(target.profileKey === 'warden' ? 7 : 10, action);
-    playSfx('freeze');
-    target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
-    target.attackPending = false;
-    target.pendingEnemyAttack = null;
-    applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
-    spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
+    spawnSpellProjectile('freeze', target);
   }
 }
 
@@ -2344,75 +2761,79 @@ function applySelfAction(action) {
     const restored = state.playerMaxHp - state.playerHp;
     state.playerHp = state.playerMaxHp;
     updateHealthUi();
-    spawnBurst(player.root.position, 0x8ed9a8, 18);
+    spawnSpellImpact('heal', player.root.position);
     spawnCombatText(player.root.position, `+${restored}`, '#9fe1bb', player.height + 0.2);
     setToast(restored > 0 ? 'Vitality restored to full.' : 'Vitality is already full.');
   } else if (action === 'buff') {
     state.playerBuffTimer = 8;
-    spawnBurst(player.root.position, 0xd0a2f0, 18);
+    activateWardVisual();
     spawnCombatText(player.root.position, 'WARD', '#d8b5f0', player.height + 0.2);
     setToast('Arcane buff active: enemy damage is negated for 8s.');
   }
 }
 
-function useAction(action, target) {
+function useAction(action, target = selectedTarget) {
   if (!state.loaded || state.finished || state.failed) return;
   const actionDef = ACTIONS[action];
   if (!actionDef) return;
   const selfAction = action === 'heal' || action === 'buff';
-  if (!selfAction && (!target || target === player || target.dead || !isEnemyAccessible(target))) return;
+  if (!selfAction && (!target || target === player || target.dead || !isEnemyAccessible(target))) {
+    if (target?.dead || (target && target !== player && !isEnemyAccessible(target))) {
+      clearSelectedTarget({ silent: true });
+    }
+    setToast('Select a living enemy target first.', 1100);
+    return;
+  }
   const remaining = state.actionCooldowns[action] ?? 0;
   if (remaining > 0) {
-    setToast(`${action === 'buff' ? 'Ward' : action[0].toUpperCase() + action.slice(1)} is ready in ${remaining.toFixed(1)}s.`, 1000);
-    closeActionMenu();
+    setToast(`${ACTION_NAMES[action]} is ready in ${remaining.toFixed(1)}s.`, 1000);
     return;
   }
   if (player.attackLock > 0 || player.attackCooldown > 0) {
     setToast('The cryptwalker is still recovering.', 1000);
-    closeActionMenu();
     return;
   }
   if (action === 'heal' && state.playerHp >= state.playerMaxHp) {
     setToast('Vitality is already full.', 1000);
-    closeActionMenu();
     return;
   }
   if (!selfAction) {
     const range = actionDef.range;
     if (player.root.position.distanceTo(target.root.position) > range) {
       setToast(`${target.name} is out of range.`, 1100);
-      closeActionMenu();
       return;
     }
     state.combatStarted = true;
     state.weaponReadyTimer = 4.5;
     player.setWeaponSheathed(false);
     player.attackLock = action === 'sword' ? 0.67 : 0.58;
-    player.attackTimer = action === 'sword' ? 0.24 : 0.2;
+    player.attackTimer = action === 'sword' ? 0.24 : SPELL_CAST_TIMES[action];
     player.attackTarget = target;
     player.pendingAction = action;
     player.face(target.root.position);
-    player.play(['1h_melee_attack', 'melee_attack', 'attack'], { once: true, force: true });
+    player.play(action === 'sword'
+      ? ['1h_melee_attack', 'melee_attack', 'attack']
+      : [action === 'fire' ? 'Cast_Fire' : 'Cast_Frost'], { once: true, force: true });
+    if (action !== 'sword') spawnSpellCharge(action);
     player.attackCooldown = action === 'sword' ? 0.52 : 0.78;
   } else {
-    player.attackLock = 0.45;
+    player.attackLock = action === 'heal' ? 0.62 : 0.56;
     player.attackCooldown = 0.65;
-    player.attackTimer = 0;
+    player.attackTimer = SPELL_CAST_TIMES[action];
     player.attackTarget = null;
-    player.pendingAction = null;
-    player.play(['idle'], { force: true });
-    applySelfAction(action);
+    player.pendingAction = action;
+    player.play([action === 'heal' ? 'Cast_Heal' : 'Cast_Arcane'], { once: true, force: true });
+    spawnSpellCharge(action);
   }
   state.actionCooldowns[action] = actionCooldownFor(action);
   state.started = true;
-  closeActionMenu();
 }
 
 function attemptAttack() {
-  const target = nearestLivingEnemy(3.1);
+  const target = selectedTarget && selectedTarget !== player && !selectedTarget.dead ? selectedTarget : null;
   if (!target) {
     state.started = true;
-    setToast('Nothing close enough to strike.');
+    setToast('Select an enemy target first.');
     return;
   }
   useAction('sword', target);
@@ -2446,16 +2867,24 @@ function updatePlayer(delta) {
     if (player.attackTimer <= 0) applyPlayerAction();
   }
   if (player.attackLock <= 0) {
-    tempVector.set(
-      (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0),
-      0,
-      (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0),
-    );
-    if (tempVector.lengthSq() > 0) {
-      tempVector.normalize();
+    const forwardInput = (keys.has('w') || keys.has('arrowup') ? 1 : 0)
+      - (keys.has('s') || keys.has('arrowdown') ? 1 : 0);
+    const strafeInput = (keys.has('d') || keys.has('arrowright') ? 1 : 0)
+      - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
+    movementDirection.set(0, 0, 0);
+    if (forwardInput !== 0 || strafeInput !== 0) {
+      camera.getWorldDirection(cameraForward);
+      cameraForward.y = 0;
+      if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
+      else cameraForward.normalize();
+      cameraRight.crossVectors(cameraForward, worldUp).normalize();
+      movementDirection
+        .addScaledVector(cameraForward, forwardInput)
+        .addScaledVector(cameraRight, strafeInput)
+        .normalize();
       const speed = player.speed * (state.playerBuffTimer > 0 ? 1.25 : 1);
-      moveActorWithinMap(player, tempVector.x * speed * delta, tempVector.z * speed * delta, 0.65);
-      player.faceDirection(tempVector);
+      moveActorWithinMap(player, movementDirection.x * speed * delta, movementDirection.z * speed * delta, 0.65);
+      player.faceDirection(movementDirection);
       player.play(['running', 'walking']);
       if (state.footstepTimer <= 0) {
         playSfx('step');
@@ -2587,7 +3016,7 @@ function spawnWardenAdds() {
       x,
       z: -43,
       height: 1.75,
-      maxHp: 22,
+      maxHp: 400,
       speed: 1.2,
       profileKey: 'rusher',
       roomId: 'wardenKeep',
@@ -2846,7 +3275,6 @@ function openChest(chest) {
 
 function interact() {
   if (!state.loaded || state.finished || state.failed) return;
-  closeActionMenu();
   state.started = true;
   const nearbyLoot = nearestLootDrop(1.9);
   if (nearbyLoot) {
@@ -2866,6 +3294,7 @@ function finishRun(success) {
   if (state.finished || state.failed) return;
   state.finished = success;
   state.failed = !success;
+  clearWardVisual();
   if (success) {
     endEyebrow.textContent = 'CRYPT CLEARED';
     endTitle.textContent = 'The path is clear.';
@@ -2879,7 +3308,7 @@ function finishRun(success) {
   targetCard.classList.add('is-hidden');
   interaction.classList.add('is-hidden');
   for (const enemy of enemies) enemy.nameplate?.element.classList.add('is-hidden');
-  closeActionMenu();
+  clearSelectedTarget({ silent: true });
   updateQuestUi();
 }
 
@@ -2901,18 +3330,23 @@ async function loadAssets() {
 
 function onKeyDown(event) {
   initAudio();
+  const activeTag = document.activeElement?.tagName?.toLowerCase();
+  if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
+  const action = ACTION_BY_KEY.get(event.code);
+  if (action && !event.repeat) {
+    useAction(action);
+    event.preventDefault();
+    return;
+  }
   const key = event.key.toLowerCase();
   if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
     state.started = true;
-    closeActionMenu();
     keys.add(key);
     event.preventDefault();
   }
   if (key === 'e' && !event.repeat) interact();
-  if (key === 'q' && !event.repeat) cycleShadowPreference();
-  if (key === 'escape') closeActionMenu();
+  if (key === 'escape' && !event.repeat) clearSelectedTarget();
   if (event.code === 'Space' && !event.repeat) {
-    closeActionMenu();
     attemptAttack();
     event.preventDefault();
   }
@@ -2958,6 +3392,9 @@ function animate() {
     }
     updateBlobShadows();
     updateEffects(delta);
+    updateSpellProjectiles(delta);
+    updateSpellVisuals(delta);
+    updateWardVisual(delta);
     updateLootDrops(delta);
     updateTelegraphs(delta);
     updateCombatTexts(delta);
@@ -2969,7 +3406,7 @@ function animate() {
     }
     updateMinimap(delta);
     updateInterface(delta);
-    updateActionMenuPosition();
+    updateTargetMarker(delta);
   }
   renderer.render(scene, camera);
 }
@@ -2985,7 +3422,6 @@ window.addEventListener('keyup', onKeyUp);
 canvas.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
   initAudio();
-  closeActionMenu();
   pointerPress = { x: event.clientX, y: event.clientY, time: performance.now() };
 });
 canvas.addEventListener('pointerup', (event) => {
@@ -2995,14 +3431,15 @@ canvas.addEventListener('pointerup', (event) => {
   pointerPress = null;
   if (distance < 8 && duration < 500) {
     const target = pickActor(event.clientX, event.clientY);
-    if (target) openActionMenu(target);
+    if (target) selectTarget(target);
+    else clearSelectedTarget();
   }
 });
 canvas.addEventListener('pointercancel', () => {
   pointerPress = null;
 });
-actionBubbles.forEach((button) => {
-  button.addEventListener('click', () => useAction(button.dataset.action, actionTarget));
+abilitySlots.forEach((button) => {
+  button.addEventListener('click', () => useAction(button.dataset.ability));
 });
 backpackSlots.forEach((button) => {
   button.addEventListener('click', () => useInventorySlot(Number(button.dataset.inventorySlot)));
@@ -3017,7 +3454,6 @@ async function start() {
     await renderer.compileAsync(scene, camera);
     state.loaded = true;
     updateProgression();
-    updateQualityReadout();
     updateInterface(0, true);
     updateInventoryUi();
     updateMinimap(0, true);

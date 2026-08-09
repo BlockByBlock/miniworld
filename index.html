@@ -54,38 +54,22 @@
       <div id="interaction" class="interaction is-hidden">Press <kbd>E</kbd> to interact</div>
       <div id="toast" class="toast" aria-live="polite"></div>
 
-      <div id="action-menu" class="action-menu is-hidden" role="menu" aria-label="Choose an action">
-        <span id="action-menu-title" class="action-menu-title">ENEMY ACTIONS</span>
-        <div class="action-options">
-          <button class="action-bubble" data-action="sword" data-scope="enemy" type="button" role="menuitem">
-            <span class="action-glyph" aria-hidden="true">⚔</span>
-            <span class="action-label">Sword</span>
-          </button>
-          <button class="action-bubble" data-action="fire" data-scope="enemy" type="button" role="menuitem">
-            <span class="action-glyph" aria-hidden="true">✹</span>
-            <span class="action-label">Fire</span>
-          </button>
-          <button class="action-bubble" data-action="freeze" data-scope="enemy" type="button" role="menuitem">
-            <span class="action-glyph" aria-hidden="true">❄</span>
-            <span class="action-label">Freeze</span>
-          </button>
-          <button class="action-bubble" data-action="heal" data-scope="self" type="button" role="menuitem">
-            <span class="action-glyph" aria-hidden="true">✚</span>
-            <span class="action-label">Heal</span>
-          </button>
-          <button class="action-bubble" data-action="buff" data-scope="self" type="button" role="menuitem">
-            <span class="action-glyph" aria-hidden="true">✦</span>
-            <span class="action-label">Ward</span>
-          </button>
-        </div>
-      </div>
-
-      <div id="ability-strip" class="hud ability-strip" aria-label="Ability cooldowns">
-        <div class="ability-slot" data-ability="sword"><span>⚔</span><small>Sword</small><strong>READY</strong></div>
-        <div class="ability-slot" data-ability="fire"><span>✹</span><small>Fire</small><strong>READY</strong></div>
-        <div class="ability-slot" data-ability="freeze"><span>❄</span><small>Freeze</small><strong>READY</strong></div>
-        <div class="ability-slot" data-ability="heal"><span>✚</span><small>Heal</small><strong>READY</strong></div>
-        <div class="ability-slot" data-ability="buff"><span>✦</span><small>Ward</small><strong>READY</strong></div>
+      <div id="ability-strip" class="hud ability-strip" aria-label="Action bar. Select a target, then choose an ability.">
+        <button class="ability-slot" data-ability="sword" data-key="1" type="button" aria-label="Sword. Press 1.">
+          <kbd>1</kbd><span aria-hidden="true">⚔</span><small>Sword</small><strong>READY</strong>
+        </button>
+        <button class="ability-slot" data-ability="fire" data-key="2" type="button" aria-label="Fire. Press 2.">
+          <kbd>2</kbd><span aria-hidden="true">✹</span><small>Fire</small><strong>READY</strong>
+        </button>
+        <button class="ability-slot" data-ability="freeze" data-key="3" type="button" aria-label="Frostbolt. Press 3.">
+          <kbd>3</kbd><span aria-hidden="true">❄</span><small>Frostbolt</small><strong>READY</strong>
+        </button>
+        <button class="ability-slot" data-ability="heal" data-key="4" type="button" aria-label="Heal. Press 4.">
+          <kbd>4</kbd><span aria-hidden="true">✚</span><small>Heal</small><strong>READY</strong>
+        </button>
+        <button class="ability-slot" data-ability="buff" data-key="5" type="button" aria-label="Ward. Press 5.">
+          <kbd>5</kbd><span aria-hidden="true">✦</span><small>Ward</small><strong>READY</strong>
+        </button>
       </div>
 
       <aside class="hud backpack-card" aria-label="Six-slot backpack">
@@ -106,9 +90,9 @@
       <aside class="hud help-card">
         <div class="help-line"><kbd>WASD</kbd><span>Move</span></div>
         <div class="help-line"><kbd>DRAG</kbd><span>View</span></div>
-        <div class="help-line"><kbd>CLICK</kbd><span>Actions</span></div>
+        <div class="help-line"><kbd>CLICK</kbd><span>Select</span></div>
+        <div class="help-line"><kbd>1–5</kbd><span>Cast</span></div>
         <div class="help-line"><kbd>E</kbd><span>Interact</span></div>
-        <div class="help-line"><kbd>Q</kbd><span id="quality-mode">Auto · Full shadows</span></div>
       </aside>
 
       <div id="loading" class="screen-card loading-card">
