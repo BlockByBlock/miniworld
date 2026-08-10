@@ -2030,17 +2030,16 @@ function buildTown() {
   createTownStatic('townTavern', { x: 0, z: -8.5, height: 4.8, colliderWidth: 6.3, colliderDepth: 5.4 });
   createTownStatic('townMarket', { x: -10.1, z: 8, height: 3.8, rotationY: Math.PI, colliderWidth: 5.1, colliderDepth: 3.4 });
   createTownStatic('townBlacksmith', { x: 10.1, z: 3.8, height: 3.8, colliderWidth: 5.1, colliderDepth: 3.4 });
-  createTownStatic('townWell', { x: 0, z: 3.4, height: 1.45, colliderWidth: 1.4, colliderDepth: 1.4 });
-  createTownStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 2.5, rotationY: Math.PI / 2 });
+  createTownStatic('townWell', { x: 0, z: 3.4, height: 2.9, colliderWidth: 2.8, colliderDepth: 2.8 });
+  createTownStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 5, rotationY: Math.PI / 2 });
   createTownStatic('townTarget', { x: 8.1, z: 10.2, height: 1.7, rotationY: Math.PI / 2 });
   createTownStatic('archGate', { x: 0, z: 14.2, width: 4.8, height: 4.4 });
   createTownStatic('townMarketStandA', { x: -12.2, z: 0.8, height: 2.1, rotationY: Math.PI / 2 });
   createTownStatic('townMarketStandB', { x: -9.4, z: 0.8, height: 1.9, rotationY: Math.PI / 2 });
-  createTownStatic('townCart', { x: -6.7, z: -0.8, height: 1.45, rotationY: 0, colliderWidth: 0.9, colliderDepth: 1.7 });
+  createTownStatic('townCart', { x: -6.7, z: -0.8, height: 2.9, rotationY: 0, colliderWidth: 1.8, colliderDepth: 3.4 });
   createTownStatic('townBarrel', { x: 7.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
   createTownStatic('townBarrel', { x: 8.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
   createTownStatic('townBench', { x: -4.5, z: 8.1, height: 0.8, rotationY: Math.PI / 2 });
-  createTownStatic('townBench', { x: 4.4, z: 8.1, height: 0.8, rotationY: -Math.PI / 2 });
 
   for (const x of [-15, -11, 11, 15]) {
     createTownStatic('townFence', { x, z: -13.3, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
