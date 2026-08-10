@@ -39,10 +39,10 @@
         <div id="target-status" class="status-row"></div>
       </div>
 
-      <aside class="hud minimap-card" aria-label="Crypt map">
+      <aside id="minimap-card" class="hud minimap-card" aria-label="Village map">
         <div class="minimap-heading">
-          <span class="eyebrow">CRYPT MAP</span>
-          <strong id="area-name">Entrance Vault</strong>
+          <span id="minimap-label" class="eyebrow">VILLAGE MAP</span>
+          <strong id="area-name">Ravenrest Village</strong>
         </div>
         <canvas id="minimap" width="240" height="190"></canvas>
         <div class="minimap-legend" aria-hidden="true">
@@ -53,6 +53,11 @@
 
       <div id="interaction" class="interaction is-hidden">Press <kbd>E</kbd> to interact</div>
       <div id="toast" class="toast" aria-live="polite"></div>
+
+      <aside id="dialogue-card" class="hud dialogue-card is-hidden" aria-live="polite">
+        <span id="dialogue-name" class="eyebrow">Ranger Rowan</span>
+        <p id="dialogue-copy"></p>
+      </aside>
 
       <div id="ability-strip" class="hud ability-strip" aria-label="Action bar. Select a target, then choose an ability.">
         <button class="ability-slot" data-ability="sword" data-key="1" type="button" aria-label="Sword. Press 1.">
@@ -72,7 +77,7 @@
         </button>
       </div>
 
-      <aside class="hud backpack-card" aria-label="Six-slot backpack">
+      <aside id="backpack-card" class="hud backpack-card" aria-label="Six-slot backpack">
         <div class="backpack-heading">
           <span class="eyebrow">BACKPACK</span>
           <span id="equipped-item" class="equipped-item">No relic equipped</span>
@@ -96,8 +101,8 @@
       </aside>
 
       <div id="loading" class="screen-card loading-card">
-        <span class="eyebrow">LOADING THE DELVE</span>
-        <h2>Waking the old stone…</h2>
+        <span class="eyebrow">LOADING RAVENREST</span>
+        <h2>Waking the village…</h2>
         <div class="loading-track"><span id="loading-fill"></span></div>
         <p id="loading-label">Preparing the lanterns</p>
       </div>

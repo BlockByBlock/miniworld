@@ -1,7 +1,12 @@
 # Forgotten Crypt
 
-`Forgotten Crypt` is a standalone Three.js hub-and-branches crypt built as an
-expanded preview. Its central hub opens into three connected branches with
+`Forgotten Crypt` is a standalone Three.js preview with two mutually exclusive
+scenes: the small Ravenrest Village hub and a hub-and-branches crypt. Ravenrest
+has a few WoC NPCs and a hunter-class ranger; speak with Ranger Rowan at the
+archery yard to teleport into the dungeon entrance. The town and dungeon are
+separate `THREE.Scene` instances, so only the active scene is rendered.
+
+The crypt's central hub opens into three connected branches with
 eleven large rooms, 36 initial enemies, branch progression, and reliquary caches.
 Every room has four times the floor area of the original layout and its own
 prop arrangement, lighting treatment, and combat formation. Burial debris,
@@ -14,7 +19,9 @@ An adaptive quality controller lowers or restores render resolution using
 averaged frame time; the renderer uses a single instanced blob-shadow pass for
 lightweight, consistent shadows.
 The western and eastern seals guide the northern Archive route; its key leads
-to a telegraphed Warden encounter. A schematic minimap, selected-target frame,
+to a telegraphed Warden encounter. At half health, the Warden enters a second
+phase, accelerates, changes the crypt lighting, and casts a player-targeted
+Soul Collapse that must be dodged. A schematic minimap, selected-target frame,
 action-bar cooldowns, projected enemy nameplates and cast bars, combat status, and
 floating feedback keep the larger delve readable. Fire and Frostbolt now use
 distinct cast clips, travelling projectiles, and impact timing; Heal resolves
@@ -36,8 +43,9 @@ npm install
 npm run dev
 ```
 
-Open the local Vite URL, then use camera-relative `WASD` to move through the hub
-and three branches, drag with the mouse to orbit the view, and scroll to zoom. Click an
+Open the local Vite URL, speak with the hunter using `E`, then use
+camera-relative `WASD` to move through the hub and three branches, drag with the
+mouse to orbit the view, and scroll to zoom. Click an
 enemy to select it, then press `1`–`5` or click the matching action-bar slot for
 `Sword`, `Fire`, `Frostbolt`, `Heal`, or `Ward`. Press `Space` to use `Sword` on
 the selected enemy, and press `Esc` or click empty ground to clear the target.

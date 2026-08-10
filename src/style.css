@@ -342,6 +342,26 @@ kbd {
   padding: 1px 5px;
 }
 
+.dialogue-card {
+  bottom: 94px;
+  left: 28px;
+  width: min(310px, calc(100vw - 56px));
+  padding: 12px 14px 13px;
+  border-color: rgba(226, 201, 144, 0.28);
+  border-radius: 11px;
+}
+
+.dialogue-card .eyebrow {
+  color: #e8c98e;
+}
+
+.dialogue-card p {
+  margin-top: 5px;
+  color: #ddd3c3;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .ability-strip {
   bottom: 27px;
   left: 50%;
@@ -633,6 +653,48 @@ kbd {
   will-change: transform, opacity;
 }
 
+.town-nameplate {
+  position: fixed;
+  z-index: 1;
+  min-width: 86px;
+  padding: 5px 7px 6px;
+  border: 1px solid rgba(214, 200, 168, 0.22);
+  border-radius: 7px;
+  background: rgba(15, 25, 21, 0.78);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.24);
+  text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+}
+
+.town-nameplate.is-hunter {
+  border-color: rgba(232, 201, 142, 0.72);
+  box-shadow: 0 0 0 1px rgba(232, 201, 142, 0.16), 0 8px 20px rgba(0, 0, 0, 0.28);
+}
+
+.town-nameplate-name,
+.town-nameplate-role {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.town-nameplate-name {
+  color: #f1e6d2;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.town-nameplate-role {
+  margin-top: 2px;
+  color: #b4cda9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 7px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .toast {
   bottom: 29px;
   left: 50%;
@@ -834,6 +896,12 @@ kbd {
 
   .interaction {
     bottom: 118px;
+  }
+
+  .dialogue-card {
+    bottom: 143px;
+    left: 13px;
+    width: min(285px, calc(100vw - 26px));
   }
 
   .toast {
