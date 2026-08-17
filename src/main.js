@@ -4,6 +4,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
+import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
@@ -58,297 +60,32 @@ const FULL_ANIMATION_DISTANCE_SQ = 30 ** 2;
 const ENEMY_SIMULATION_DISTANCE_SQ = 18 ** 2;
 const ENEMY_RENDER_DISTANCE_SQ = 34 ** 2;
 
-const ACTIONS = {
-  sword: { cooldown: 0.7, range: 3.45 },
-  fire: { cooldown: 3.8, range: 8.5 },
-  freeze: { cooldown: 7.5, range: 8.5 },
-  heal: { cooldown: 14, range: 0 },
-  buff: { cooldown: 18, range: 0 },
-};
+const ASSETS = WORLD_DATA.assets;
+const ACTIONS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, {
+  cooldown: action.cooldown,
+  range: action.range,
+}]));
 const HEAL_FRACTION = 0.3;
-
-const ACTION_NAMES = {
-  sword: 'Sword',
-  fire: 'Fire',
-  freeze: 'Frostbolt',
-  heal: 'Heal',
-  buff: 'Ward',
-};
-
-const ACTION_BAR_KEYS = {
-  sword: ['Digit1', 'Numpad1'],
-  fire: ['Digit2', 'Numpad2'],
-  freeze: ['Digit3', 'Numpad3'],
-  heal: ['Digit4', 'Numpad4'],
-  buff: ['Digit5', 'Numpad5'],
-};
+const ACTION_NAMES = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.name]));
+const ACTION_BAR_KEYS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.keys]));
 
 const ACTION_BY_KEY = new Map(
   Object.entries(ACTION_BAR_KEYS).flatMap(([action, codes]) => codes.map((code) => [code, action])),
 );
 
-const SPELL_COLORS = {
-  fire: 0xff7a2a,
-  freeze: 0x9fd8f0,
-  heal: 0x8ed9a8,
-  buff: 0xc9a6ff,
-};
+const SPELL_COLORS = Object.fromEntries(Object.entries(WORLD_DATA.actions)
+  .filter(([, action]) => action.spellColor)
+  .map(([id, action]) => [id, action.spellColor]));
+const SPELL_CAST_TIMES = Object.fromEntries(Object.entries(WORLD_DATA.actions)
+  .filter(([, action]) => action.castTime !== undefined)
+  .map(([id, action]) => [id, action.castTime]));
+const ITEM_DEFS = WORLD_DATA.items;
+const ENEMY_PROFILES = WORLD_DATA.enemyProfiles;
+const WORLD = WORLD_DATA.world;
+const TOWN_WORLD = WORLD_DATA.town.bounds;
+const MAP = WORLD_DATA.map;
+const ROOM_BRANCH = WORLD_DATA.roomBranch;
 
-const SPELL_CAST_TIMES = {
-  fire: 0.32,
-  freeze: 0.48,
-  heal: 0.44,
-  buff: 0.36,
-};
-
-const ITEM_DEFS = {
-  healingDraft: {
-    name: 'Gravebloom Draft',
-    kind: 'consumable',
-    glyph: '✚',
-    color: '#91cfa7',
-    description: 'Restore 30 vitality.',
-  },
-  ossuaryEdge: {
-    name: 'Ossuary Edge',
-    kind: 'equipment',
-    glyph: '⚔',
-    color: '#8fc8bd',
-    description: 'Sword damage +20%.',
-    damage: { sword: 1.2 },
-  },
-  emberCharm: {
-    name: 'Ember Charm',
-    kind: 'equipment',
-    glyph: '✹',
-    color: '#d68b65',
-    description: 'Fire damage +25%.',
-    damage: { fire: 1.25 },
-  },
-  frostRune: {
-    name: 'Rimebound Rune',
-    kind: 'equipment',
-    glyph: '❄',
-    color: '#87c8e8',
-    description: 'Frostbolt cooldown -25%.',
-    cooldown: { freeze: 0.75 },
-  },
-  wardenRelic: {
-    name: 'Warden Relic',
-    kind: 'equipment',
-    glyph: '◆',
-    color: '#c49ae6',
-    description: 'All damage +12%.',
-    damage: { sword: 1.12, fire: 1.12, freeze: 1.12 },
-  },
-};
-
-const ENEMY_PROFILES = {
-  guard: { kind: 'melee', damage: 2, desiredRange: 1.72, attackRange: 2.25, attackCooldown: 1.9, windup: 0.32, leash: 9 },
-  rusher: { kind: 'melee', damage: 3, desiredRange: 1.6, attackRange: 2.2, attackCooldown: 1.65, windup: 0.24, chaseMult: 1.55, leash: 10 },
-  pulser: { kind: 'pulse', damage: 5, desiredRange: 5.4, attackRange: 7.2, attackCooldown: 3.6, windup: 0.9, radius: 1.8, leash: 8 },
-  support: { kind: 'support', damage: 3, desiredRange: 5.8, attackRange: 7.5, attackCooldown: 4.2, windup: 0.95, radius: 1.35, heal: 10, leash: 8 },
-  warden: { kind: 'warden', damage: 5, desiredRange: 1.9, attackRange: 2.5, attackCooldown: 2.15, windup: 0.38, leash: 11, slamCooldown: 6.4 },
-};
-
-const ROOM_BRANCH = {
-  westGate: 'west',
-  westBurial: 'west',
-  westOssuary: 'west',
-  eastGate: 'east',
-  eastFlooded: 'east',
-  eastReliquary: 'east',
-  northHall: 'north',
-  northLibrary: 'north',
-  wardenKeep: 'north',
-};
-
-const ASSETS = {
-  knight: '/assets/models/chars/players/knight.glb',
-  ranger: '/assets/models/chars/players/ranger.glb',
-  rogue: '/assets/models/chars/players/rogue.glb',
-  sword: '/assets/models/weapons/sword_1handed.glb',
-  skeletonWarrior: '/assets/models/chars/enemies/skeleton_warrior.glb',
-  skeletonGolem: '/assets/models/chars/enemies/skeleton_golem.glb',
-  skeletonMage: '/assets/models/chars/enemies/skeleton_mage.glb',
-  skeletonRogue: '/assets/models/chars/enemies/skeleton_rogue.glb',
-  skeletonMinion: '/assets/models/chars/enemies/skeleton_minion.glb',
-  floorTile: '/assets/models/dungeon/floor_tile_small.glb',
-  archGate: '/assets/models/dungeon/arch_gate.glb',
-  torch: '/assets/models/dungeon/torch_lit.glb',
-  chest: '/assets/models/dungeon/chest.glb',
-  chestGold: '/assets/models/dungeon/chest_gold.glb',
-  column: '/assets/models/dungeon/column.glb',
-  crypt: '/assets/models/dungeon/crypt.glb',
-  barrelStack: '/assets/models/dungeon/barrel_small_stack.glb',
-  boneA: '/assets/models/dungeon/bone_A.glb',
-  boneB: '/assets/models/dungeon/bone_B.glb',
-  boneC: '/assets/models/dungeon/bone_c.glb',
-  bookcase: '/assets/models/dungeon/bookcase_double_decorateda.glb',
-  candleTriple: '/assets/models/dungeon/candle_triple.glb',
-  coffin: '/assets/models/dungeon/coffin_decorated.glb',
-  crateStack: '/assets/models/dungeon/crates_stacked.glb',
-  brokenFloorA: '/assets/models/dungeon/floor_tile_small_broken_A.glb',
-  brokenFloorB: '/assets/models/dungeon/floor_tile_small_broken_B.glb',
-  rubbleHalf: '/assets/models/dungeon/rubble_half.glb',
-  rubbleLarge: '/assets/models/dungeon/rubble_large.glb',
-  skull: '/assets/models/dungeon/skull.glb',
-  skullCandle: '/assets/models/dungeon/skull_candle.glb',
-  brokenTable: '/assets/models/dungeon/table_long_broken.glb',
-  cobweb: '/assets/models/biome/dungeon_cobweb.glb',
-  coins: '/assets/models/biome/dungeon_coins.glb',
-  horseStatue: '/assets/models/biome/dungeon_statue_horse.glb',
-  woodSupport: '/assets/models/biome/dungeon_wood_support.glb',
-  townHomeA: '/assets/models/biome/hex_home_a.glb',
-  townHomeB: '/assets/models/biome/hex_home_b.glb',
-  townTavern: '/assets/models/biome/hex_tavern.glb',
-  townMarket: '/assets/models/biome/hex_market.glb',
-  townBlacksmith: '/assets/models/biome/hex_blacksmith.glb',
-  townWell: '/assets/models/biome/hex_well.glb',
-  townArcheryRange: '/assets/models/biome/hexr_archeryrange.glb',
-  townTarget: '/assets/models/biome/hex_target.glb',
-  townBarrel: '/assets/models/biome/kcas_barrel.glb',
-  townBench: '/assets/models/biome/kcas_bench.glb',
-  townCart: '/assets/models/props/cart.glb',
-  townFence: '/assets/models/props/fence.glb',
-  townMarketStandA: '/assets/models/props/market_stand_1.glb',
-  townMarketStandB: '/assets/models/props/market_stand_2.glb',
-};
-
-const WORLD = {
-  minX: -59,
-  maxX: 59,
-  minZ: -51,
-  maxZ: 37,
-};
-
-const TOWN_WORLD = {
-  minX: -18,
-  maxX: 18,
-  minZ: -15,
-  maxZ: 16,
-};
-
-const MAP = {
-  rooms: [
-    {
-      id: 'entrance',
-      label: 'Entrance Vault',
-      minX: -10,
-      maxX: 10,
-      minZ: 20,
-      maxZ: 34,
-      openings: { north: [[-4, 4]] },
-    },
-    {
-      id: 'hub',
-      label: 'The Bell Hub',
-      minX: -14,
-      maxX: 14,
-      minZ: 2,
-      maxZ: 18,
-      openings: {
-        south: [[-4, 4]],
-        west: [[4, 12]],
-        east: [[4, 12]],
-        north: [[-4, 4]],
-      },
-    },
-    {
-      id: 'westGate',
-      label: 'Burial Hall',
-      minX: -34,
-      maxX: -18,
-      minZ: 2,
-      maxZ: 16,
-      openings: { east: [[4, 12]], west: [[4, 12]] },
-    },
-    {
-      id: 'westBurial',
-      label: 'Ashen Gallery',
-      minX: -56,
-      maxX: -38,
-      minZ: 2,
-      maxZ: 16,
-      openings: { east: [[4, 12]], north: [[-50, -44]] },
-    },
-    {
-      id: 'westOssuary',
-      label: 'The Ossuary',
-      minX: -56,
-      maxX: -38,
-      minZ: -16,
-      maxZ: 0,
-      openings: { south: [[-50, -44]] },
-    },
-    {
-      id: 'eastGate',
-      label: 'Flooded Hall',
-      minX: 18,
-      maxX: 34,
-      minZ: 2,
-      maxZ: 16,
-      openings: { west: [[4, 12]], east: [[4, 12]] },
-    },
-    {
-      id: 'eastFlooded',
-      label: 'Drowned Gallery',
-      minX: 38,
-      maxX: 56,
-      minZ: 2,
-      maxZ: 16,
-      openings: { west: [[4, 12]], north: [[44, 50]] },
-    },
-    {
-      id: 'eastReliquary',
-      label: 'The Reliquary',
-      minX: 38,
-      maxX: 56,
-      minZ: -16,
-      maxZ: 0,
-      openings: { south: [[44, 50]] },
-    },
-    {
-      id: 'northHall',
-      label: 'Catacomb Crossing',
-      minX: -12,
-      maxX: 12,
-      minZ: -16,
-      maxZ: -4,
-      openings: { south: [[-4, 4]], north: [[-4, 4]] },
-    },
-    {
-      id: 'northLibrary',
-      label: 'The Silent Archive',
-      minX: -12,
-      maxX: 12,
-      minZ: -32,
-      maxZ: -18,
-      openings: { south: [[-4, 4]], north: [[-4, 4]] },
-    },
-    {
-      id: 'wardenKeep',
-      label: 'Warden\'s Keep',
-      minX: -16,
-      maxX: 16,
-      minZ: -50,
-      maxZ: -34,
-      openings: { south: [[-4, 4]] },
-    },
-  ],
-  corridors: [
-    { id: 'entry-corridor', minX: -4, maxX: 4, minZ: 18, maxZ: 22 },
-    { id: 'west-corridor', minX: -18, maxX: -14, minZ: 4, maxZ: 12 },
-    { id: 'west-deep-corridor', minX: -38, maxX: -34, minZ: 4, maxZ: 12 },
-    { id: 'west-drop', minX: -50, maxX: -44, minZ: -2, maxZ: 4 },
-    { id: 'east-corridor', minX: 14, maxX: 18, minZ: 4, maxZ: 12 },
-    { id: 'east-deep-corridor', minX: 34, maxX: 38, minZ: 4, maxZ: 12 },
-    { id: 'east-drop', minX: 44, maxX: 50, minZ: -2, maxZ: 4 },
-    { id: 'north-corridor', minX: -4, maxX: 4, minZ: -4, maxZ: 2 },
-    { id: 'archive-corridor', minX: -4, maxX: 4, minZ: -18, maxZ: -14 },
-    { id: 'warden-corridor', minX: -4, maxX: 4, minZ: -34, maxZ: -30 },
-  ],
-};
 MAP.zones = [...MAP.rooms, ...MAP.corridors];
 const corridorZones = new Set(MAP.corridors);
 const ZONE_BY_ID = new Map(MAP.zones.map((zone) => [zone.id, zone]));
@@ -632,7 +369,7 @@ function alignVisualToGround(visual, desiredHeight) {
   visual.updateMatrixWorld(true);
 }
 
-function fitStaticVisual(visual, { width, depth, height } = {}) {
+function fitStaticVisual(visual, { width, depth, height, stretch = false } = {}) {
   visual.updateMatrixWorld(true);
   tempBox.setFromObject(visual);
   tempBox.getSize(tempSize);
@@ -641,7 +378,13 @@ function fitStaticVisual(visual, { width, depth, height } = {}) {
   if (depth && tempSize.z > 0.001) factors.push(depth / tempSize.z);
   if (height && tempSize.y > 0.001) factors.push(height / tempSize.y);
   if (factors.length) {
-    visual.scale.multiplyScalar(Math.min(...factors));
+    if (stretch) {
+      if (width && tempSize.x > 0.001) visual.scale.x *= width / tempSize.x;
+      if (depth && tempSize.z > 0.001) visual.scale.z *= depth / tempSize.z;
+      if (height && tempSize.y > 0.001) visual.scale.y *= height / tempSize.y;
+    } else {
+      visual.scale.multiplyScalar(Math.min(...factors));
+    }
     visual.updateMatrixWorld(true);
     tempBox.setFromObject(visual);
   }
@@ -923,6 +666,7 @@ function createStatic(assetKey, {
   width,
   depth,
   height,
+  stretch = false,
   colliderWidth = 0,
   colliderDepth = 0,
   parent = null,
@@ -931,7 +675,7 @@ function createStatic(assetKey, {
   const source = assets.get(assetKey);
   const root = new THREE.Group();
   const visual = source.scene.clone(true);
-  fitStaticVisual(visual, { width, depth, height });
+  fitStaticVisual(visual, { width, depth, height, stretch });
   root.add(visual);
   root.position.set(x, y, z);
   root.rotation.y = rotationY;
@@ -1159,7 +903,31 @@ function updateBlobShadows() {
   shadowMesh.instanceMatrix.needsUpdate = true;
 }
 
-function addWallSpan({ fixed, start, end, openings = [], horizontal, material }) {
+function addBrickWall({
+  x,
+  z,
+  width,
+  depth,
+  rotationY = 0,
+  colliderWidth = 0,
+  colliderDepth = 0,
+  parent = null,
+}) {
+  return createStatic('wall', {
+    x,
+    z,
+    rotationY,
+    width,
+    depth,
+    height: 2.7,
+    stretch: true,
+    colliderWidth,
+    colliderDepth,
+    parent,
+  });
+}
+
+function addWallSpan({ fixed, start, end, openings = [], horizontal, parent = null }) {
   const clippedOpenings = openings
     .map(([openStart, openEnd]) => [Math.max(start, openStart), Math.min(end, openEnd)])
     .filter(([openStart, openEnd]) => openEnd - openStart > 0.1)
@@ -1168,33 +936,29 @@ function addWallSpan({ fixed, start, end, openings = [], horizontal, material })
   for (const [openStart, openEnd] of clippedOpenings) {
     if (openStart - cursor > 0.45) {
       const length = openStart - cursor;
-      addBox({
+      const wallDimensions = brickWallDimensions({ horizontal, length, thickness: 0.5 });
+      addBrickWall({
         x: horizontal ? (cursor + openStart) / 2 : fixed,
-        y: 1.35,
         z: horizontal ? fixed : (cursor + openStart) / 2,
-        width: horizontal ? length : 0.5,
-        height: 2.7,
-        depth: horizontal ? 0.5 : length,
-        material,
+        ...wallDimensions,
+        parent,
       });
     }
     cursor = Math.max(cursor, openEnd);
   }
   if (end - cursor > 0.45) {
     const length = end - cursor;
-    addBox({
+    const wallDimensions = brickWallDimensions({ horizontal, length, thickness: 0.5 });
+    addBrickWall({
       x: horizontal ? (cursor + end) / 2 : fixed,
-      y: 1.35,
       z: horizontal ? fixed : (cursor + end) / 2,
-      width: horizontal ? length : 0.5,
-      height: 2.7,
-      depth: horizontal ? 0.5 : length,
-      material,
+      ...wallDimensions,
+      parent,
     });
   }
 }
 
-function buildRoomWalls(room, wallMaterial) {
+function buildRoomWalls(room) {
   const openings = room.openings ?? {};
   addWallSpan({
     fixed: room.minZ,
@@ -1202,7 +966,6 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxX,
     openings: openings.north,
     horizontal: true,
-    material: wallMaterial,
   });
   addWallSpan({
     fixed: room.maxZ,
@@ -1210,7 +973,6 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxX,
     openings: openings.south,
     horizontal: true,
-    material: wallMaterial,
   });
   addWallSpan({
     fixed: room.minX,
@@ -1218,7 +980,6 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxZ,
     openings: openings.west,
     horizontal: false,
-    material: wallMaterial,
   });
   addWallSpan({
     fixed: room.maxX,
@@ -1226,7 +987,19 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxZ,
     openings: openings.east,
     horizontal: false,
-    material: wallMaterial,
+  });
+
+  const corners = [
+    [room.minX, room.minZ, true, true],
+    [room.maxX, room.minZ, false, true],
+    [room.maxX, room.maxZ, false, false],
+    [room.minX, room.maxZ, true, false],
+  ];
+  corners.forEach(([x, z, west, north]) => {
+    addDecoration('wallCorner', x, z, {
+      height: 2.7,
+      rotationY: brickWallCornerRotation({ west, north }),
+    });
   });
 }
 
@@ -1323,6 +1096,8 @@ function decorateRoom(room) {
     addColumn(7.5, 31);
     addWallTorch(room, 'west', 27);
     addWallTorch(room, 'east', 27);
+    addDecoration('banner', room.minX + 0.7, 27, { height: 2.65, rotationY: Math.PI / 2 });
+    addDecoration('banner', room.maxX - 0.7, 27, { height: 2.65, rotationY: -Math.PI / 2 });
     addDecoration('candleTriple', -8.4, 29.2, { height: 0.48 });
     addDecoration('candleTriple', 8.4, 24.8, { height: 0.48, rotationY: Math.PI / 2 });
     addRoomLight(room, 0xffbd74, 1.5);
@@ -1333,6 +1108,8 @@ function decorateRoom(room) {
     addWallTorch(room, 'north', 9);
     addWallTorch(room, 'south', -9);
     addWallTorch(room, 'south', 9);
+    addDecoration('banner', room.minX + 0.7, 10, { height: 2.65, rotationY: Math.PI / 2 });
+    addDecoration('banner', room.maxX - 0.7, 10, { height: 2.65, rotationY: -Math.PI / 2 });
     addDecoration('rubbleHalf', -12.1, 3.4, { width: 1.8 });
     addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
     addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
@@ -1508,11 +1285,6 @@ function buildCrypt() {
   grid.material.opacity = 0.11;
   scene.add(grid);
 
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: 0x171928,
-    roughness: 0.96,
-    metalness: 0.02,
-  });
   const corridorMaterial = new THREE.MeshStandardMaterial({
     color: 0x34374a,
     roughness: 0.9,
@@ -1524,7 +1296,7 @@ function buildCrypt() {
       const floorPlacements = [];
       tileZone(room, floorPlacements);
       createFloorTiles(floorPlacements);
-      buildRoomWalls(room, wallMaterial);
+      buildRoomWalls(room);
       decorateRoom(room);
     });
   }
@@ -1544,7 +1316,6 @@ function buildCrypt() {
       createFloorTiles(floorPlacements);
     });
   }
-  return wallMaterial;
 }
 
 function spawnActor({ assetKey, type, name, role, x, z, height, maxHp, speed, profileKey, roomId, sceneRoot = scene }) {
@@ -1564,30 +1335,26 @@ function spawnActor({ assetKey, type, name, role, x, z, height, maxHp, speed, pr
 }
 
 function buildChests() {
-  const chestSpawns = [
-    { id: 'hub-cache', name: 'Bell Hub cache', x: 0, z: 14.2, roomId: 'hub', kind: 'cache' },
-    { id: 'ashen-cache', name: 'Ashen Gallery cache', x: -47, z: 10, roomId: 'westBurial', kind: 'cache' },
-    { id: 'west-seal', name: 'Ossuary reliquary', x: -47, z: -13, roomId: 'westOssuary', kind: 'seal', branch: 'west' },
-    { id: 'drowned-cache', name: 'Drowned Gallery cache', x: 47, z: 10, roomId: 'eastFlooded', kind: 'cache' },
-    { id: 'east-seal', name: 'Reliquary vault', x: 47, z: -12.5, roomId: 'eastReliquary', kind: 'seal', branch: 'east' },
-    { id: 'archive-key', name: 'Silent Archive cache', x: 0, z: -27, roomId: 'northLibrary', kind: 'archive' },
-    { id: 'warden-spoils', name: "Warden's spoils", x: 0, z: -47.5, roomId: 'wardenKeep', kind: 'final' },
-  ];
-  state.chests = chestSpawns.map((chest) => ({
-    ...chest,
-    position: new THREE.Vector3(chest.x, 0, chest.z),
-    root: createStatic('chest', {
-      x: chest.x,
-      z: chest.z,
-      width: 1.35,
-      height: 1.05,
-      parent: zoneRenderGroups.get(chest.roomId),
-      colliderWidth: 1.25,
-      colliderDepth: 0.9,
-    }),
-    opened: false,
-    rewardRoot: null,
-  }));
+  state.chests = WORLD_DATA.chests.map((chest) => {
+    const [x, z] = chest.position;
+    return {
+      ...chest,
+      x,
+      z,
+      position: new THREE.Vector3(x, 0, z),
+      root: createStatic('chest', {
+        x,
+        z,
+        width: 1.35,
+        height: 1.05,
+        parent: zoneRenderGroups.get(chest.roomId),
+        colliderWidth: 1.25,
+        colliderDepth: 0.9,
+      }),
+      opened: false,
+      rewardRoot: null,
+    };
+  });
   state.openedChests = 0;
 }
 
@@ -1622,7 +1389,7 @@ function setGateWallFrameVisible(gate, roomId, visible) {
   });
 }
 
-function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wallMaterial }) {
+function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth }) {
   const { x, z } = gateWallPosition(corridor, roomId, travelsAlongZ);
   const wallThickness = 0.5;
   const parent = zoneRenderGroups.get(corridor.id);
@@ -1635,14 +1402,11 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wal
     ];
     for (const [startX, endX] of wallSections) {
       const sideWidth = endX - startX;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x: (startX + endX) / 2,
-        y: 1.35,
         z,
         width: sideWidth,
-        height: 2.7,
         depth: wallThickness,
-        material: wallMaterial,
         colliderWidth: sideWidth,
         colliderDepth: wallThickness,
         parent,
@@ -1655,16 +1419,14 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wal
     ];
     for (const [startZ, endZ] of wallSections) {
       const sideWidth = endZ - startZ;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x,
-        y: 1.35,
         z: (startZ + endZ) / 2,
-        width: wallThickness,
-        height: 2.7,
-        depth: sideWidth,
-        material: wallMaterial,
-        colliderWidth: wallThickness,
-        colliderDepth: sideWidth,
+        width: sideWidth,
+        depth: wallThickness,
+        rotationY: Math.PI / 2,
+        colliderWidth: sideWidth,
+        colliderDepth: wallThickness,
         parent,
       }));
     }
@@ -1673,7 +1435,7 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wal
   return wallRoots;
 }
 
-function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth, wallMaterial }) {
+function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth }) {
   const corridorX = (corridor.minX + corridor.maxX) / 2;
   const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
   const endpointPositions = roomIds.map((roomId) => gateWallPosition(corridor, roomId, travelsAlongZ));
@@ -1691,14 +1453,11 @@ function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth
     ];
     for (const [startX, endX] of wallSections) {
       const sideWidth = endX - startX;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x: (startX + endX) / 2,
-        y: 1.35,
         z: (minZ + maxZ) / 2,
         width: sideWidth,
-        height: 2.7,
         depth: wallDepth,
-        material: wallMaterial,
         colliderWidth: sideWidth,
         colliderDepth: wallDepth,
         parent,
@@ -1714,14 +1473,11 @@ function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth
     ];
     for (const [startZ, endZ] of wallSections) {
       const sideWidth = endZ - startZ;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x: (minX + maxX) / 2,
-        y: 1.35,
         z: (startZ + endZ) / 2,
         width: wallWidth,
-        height: 2.7,
         depth: sideWidth,
-        material: wallMaterial,
         colliderWidth: wallWidth,
         colliderDepth: sideWidth,
         parent,
@@ -1732,7 +1488,7 @@ function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth
   return wallRoots;
 }
 
-function buildGates(wallMaterial) {
+function buildGates() {
   state.gates = MAP.corridors.map((corridor) => {
     const roomIds = (ZONE_NEIGHBORS.get(corridor.id) ?? []).filter((id) => ROOM_IDS.has(id));
     if (roomIds.length !== 2) {
@@ -1756,14 +1512,12 @@ function buildGates(wallMaterial) {
       roomIds,
       travelsAlongZ,
       openingWidth,
-      wallMaterial,
     });
     const wallFrames = new Map(roomIds.map((roomId) => [roomId, buildGateWallFrame({
       corridor,
       roomId,
       travelsAlongZ,
       openingWidth,
-      wallMaterial,
     })]));
     wallFrames.get(roomIds[1]).forEach((root) => {
       root.visible = false;
@@ -1794,145 +1548,47 @@ function buildGates(wallMaterial) {
 
 function buildActors() {
   player = spawnActor({
-    assetKey: 'knight',
+    ...WORLD_DATA.player,
     type: 'player',
-    name: 'Cryptwalker',
-    x: 0,
-    z: 12.0,
-    height: 1.85,
-    maxHp: 100,
-    speed: 4.2,
     sceneRoot: townScene,
   });
-  const enemySpawns = [
-    ['Boneguard Captain', -31, 9, 'guard', 'westGate', 'skeletonMinion'],
-    ['Burial Hall Reaver', -27, 7, 'rusher', 'westGate', 'skeletonRogue'],
-    ['Sepulcher Watch', -23, 10, 'guard', 'westGate'],
-    ['Dustbound Ringer', -20, 7, 'pulser', 'westGate', 'skeletonMage'],
-    ['Ashen Sentry', -54, 10, 'guard', 'westBurial'],
-    ['Cinderblade', -50, 9, 'rusher', 'westBurial'],
-    ['Gallery Keeper', -44, 10, 'support', 'westBurial'],
-    ['Ember Husk', -40, 9, 'rusher', 'westBurial'],
-    ['Ossuary Ringer', -52, -9, 'pulser', 'westOssuary'],
-    ['Marrow Guard', -43, -9, 'guard', 'westOssuary'],
-    ['Bone Collector', -50, -3, 'support', 'westOssuary'],
-    ['Sepulcher Fang', -42, -12, 'rusher', 'westOssuary'],
-    ['Flooded Hall Guard', 20, 9, 'guard', 'eastGate'],
-    ['Brine Reaver', 24, 8, 'rusher', 'eastGate'],
-    ['Sunken Watch', 29, 10, 'guard', 'eastGate'],
-    ['Tide Ringer', 32, 7, 'pulser', 'eastGate'],
-    ['Drowned Ringer', 40, 10, 'pulser', 'eastFlooded'],
-    ['Siltwalker', 44, 9, 'rusher', 'eastFlooded'],
-    ['Gallery Acolyte', 50, 10, 'support', 'eastFlooded'],
-    ['Brinebound', 54, 9, 'guard', 'eastFlooded'],
-    ['Reliquary Acolyte', 40, -9, 'support', 'eastReliquary'],
-    ['Gilded Guard', 44, -5, 'guard', 'eastReliquary'],
-    ['Vault Reaver', 50, -5, 'rusher', 'eastReliquary'],
-    ['Relic Ringer', 54, -10, 'pulser', 'eastReliquary'],
-    ['Catacomb Pursuer', -7, -10, 'rusher', 'northHall'],
-    ['Crossing Guard', 7, -10, 'guard', 'northHall'],
-    ['Grave Bolt Acolyte', -5, -6, 'support', 'northHall'],
-    ['Catacomb Ringer', 5, -14, 'pulser', 'northHall'],
-    ['Archive Acolyte', -5, -23, 'support', 'northLibrary', 'skeletonMage'],
-    ['Silent Reaver', 5, -23, 'rusher', 'northLibrary', 'skeletonRogue'],
-    ['Index Guard', -4, -28, 'guard', 'northLibrary'],
-    ['Dust Scribe', 4, -20, 'pulser', 'northLibrary'],
-    ['Warden Vanguard', -5, -41, 'guard', 'wardenKeep'],
-    ['Warden Reaver', 5, -41, 'rusher', 'wardenKeep'],
-    ['Warden Acolyte', 0, -45, 'support', 'wardenKeep'],
-  ];
-  for (const [name, x, z, profileKey, roomId, assetKey = 'skeletonWarrior'] of enemySpawns) {
-    const profileStats = profileKey === 'rusher'
-      ? { maxHp: 200, speed: 1.18 }
-      : profileKey === 'pulser'
-        ? { maxHp: 300, speed: 0.9 }
-        : profileKey === 'support'
-          ? { maxHp: 280, speed: 0.92 }
-          : { maxHp: 250, speed: 1.05 };
+  for (const spawn of WORLD_DATA.enemySpawns) {
+    const profile = ENEMY_PROFILES[spawn.profileKey];
+    const [x, z] = spawn.position;
     enemies.push(spawnActor({
-      assetKey,
+      assetKey: spawn.assetKey,
       type: 'enemy',
-      name,
+      name: spawn.name,
       x,
       z,
-      height: 1.8,
-      profileKey,
-      roomId,
-      ...profileStats,
+      height: spawn.height,
+      maxHp: profile.maxHp,
+      speed: profile.speed,
+      profileKey: spawn.profileKey,
+      roomId: spawn.roomId,
     }));
   }
-  enemies.push(spawnActor({
-    assetKey: 'skeletonGolem',
-    type: 'enemy',
-    name: 'Crypt Warden',
-    x: 0,
-    z: -40,
-    height: 2.2,
-    maxHp: 2000,
-    speed: 0.72,
-    profileKey: 'warden',
-    roomId: 'wardenKeep',
-  }));
 }
 
 function buildTownActors() {
-  const rowan = spawnActor({
-    assetKey: 'ranger',
-    type: 'npc',
-    name: 'Ranger Rowan',
-    role: 'Hunter',
-    x: 0,
-    z: 10.15,
-    height: 1.85,
-    sceneRoot: townScene,
-  });
-  const elin = spawnActor({
-    assetKey: 'knight',
-    type: 'npc',
-    name: 'Guard Elin',
-    role: 'Town guard',
-    x: -7.1,
-    z: 3.8,
-    height: 1.8,
-    sceneRoot: townScene,
-  });
-  const vale = spawnActor({
-    assetKey: 'rogue',
-    type: 'npc',
-    name: 'Tinker Vale',
-    role: 'Artificer',
-    x: 6.6,
-    z: 3.8,
-    height: 1.75,
-    sceneRoot: townScene,
-  });
-  townNpcs.push(rowan, elin, vale);
-  configureTownPatrol(elin, [
-    { x: -6.6, z: 3.8 },
-    { x: -2.2, z: 3.8 },
-    { x: -2.2, z: 5.8 },
-    { x: 0, z: 5.8 },
-    { x: 0, z: 12.8 },
-    { x: 2.2, z: 12.8 },
-    { x: 2.2, z: 5.8 },
-    { x: 2.2, z: 3.8 },
-    { x: 6.6, z: 3.8 },
-    { x: 2.2, z: 3.8 },
-    { x: 2.2, z: 5.8 },
-    { x: 0, z: 5.8 },
-    { x: -2.2, z: 5.8 },
-    { x: -2.2, z: 3.8 },
-  ], { speed: 1.25, pause: 0.45 });
-  configureTownPatrol(vale, [
-    { x: 2.8, z: 3.8 },
-    { x: 6.6, z: 3.8 },
-  ], { speed: 0.9, pause: 0.8 });
-  configureTownPatrol(rowan, [
-    { x: 0, z: 13.1 },
-    { x: 0, z: 10.2 },
-    { x: 3.7, z: 10.2 },
-    { x: 0, z: 10.2 },
-  ], { speed: 1.1, pause: 0.7 });
+  for (const npcData of WORLD_DATA.town.npcs) {
+    const { position, patrol, ...actorData } = npcData;
+    const [x, z] = position;
+    const npc = spawnActor({
+      ...actorData,
+      type: 'npc',
+      x,
+      z,
+      sceneRoot: townScene,
+    });
+    townNpcs.push(npc);
+    if (patrol) {
+      configureTownPatrol(npc, patrol.waypoints.map(([waypointX, waypointZ]) => ({ x: waypointX, z: waypointZ })), {
+        speed: patrol.speed,
+        pause: patrol.pause,
+      });
+    }
+  }
   townNpcs.forEach((npc) => {
     npc.awake = true;
     npc.play(['idle', 'idle_combat'], { force: true });
@@ -2024,27 +1680,10 @@ function buildTown() {
   addBox({ x: 0, y: 0.01, z: 3.8, width: 1.15, height: 0.08, depth: 23, material: roadEdgeMaterial, parent: townWorldGroup });
 
   const townStatic = { parent: townWorldGroup, colliders: townStaticColliders };
-  createStatic('townHomeA', { x: -10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8, ...townStatic });
-  createStatic('townHomeB', { x: 10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8, ...townStatic });
-  createStatic('townTavern', { x: 0, z: -8.5, height: 4.8, colliderWidth: 6.3, colliderDepth: 5.4, ...townStatic });
-  createStatic('townMarket', { x: -10.1, z: 8, height: 3.8, rotationY: Math.PI, colliderWidth: 5.1, colliderDepth: 3.4, ...townStatic });
-  createStatic('townBlacksmith', { x: 10.1, z: 3.8, height: 3.8, colliderWidth: 5.1, colliderDepth: 3.4, ...townStatic });
-  createStatic('townWell', { x: 0, z: 3.4, height: 2.9, colliderWidth: 2.8, colliderDepth: 2.8, ...townStatic });
-  createStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 5, rotationY: Math.PI / 2, ...townStatic });
-  createStatic('townTarget', { x: 8.1, z: 10.2, height: 1.7, rotationY: Math.PI / 2, ...townStatic });
-  createStatic('archGate', { x: 0, z: 14.2, width: 4.8, height: 4.4, ...townStatic });
-  createStatic('townMarketStandA', { x: -12.2, z: 0.8, height: 2.1, rotationY: Math.PI / 2, ...townStatic });
-  createStatic('townMarketStandB', { x: -9.4, z: 0.8, height: 1.9, rotationY: Math.PI / 2, ...townStatic });
-  createStatic('townCart', { x: -6.7, z: -0.8, height: 2.9, rotationY: 0, colliderWidth: 1.8, colliderDepth: 3.4, ...townStatic });
-  createStatic('townBarrel', { x: 7.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8, ...townStatic });
-  createStatic('townBarrel', { x: 8.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8, ...townStatic });
-  createStatic('townBench', { x: -4.5, z: 8.1, height: 0.8, rotationY: Math.PI / 2, ...townStatic });
-
-  for (const x of [-15, -11, 11, 15]) {
-    createStatic('townFence', { x, z: -13.3, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35, ...townStatic });
-  }
-  for (const x of [-15, -11, 11, 15]) {
-    createStatic('townFence', { x, z: 15.2, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35, ...townStatic });
+  for (const placement of WORLD_DATA.town.placements) {
+    const { assetKey, position, ...options } = placement;
+    const [x, z] = position;
+    createStatic(assetKey, { ...options, x, z, ...townStatic });
   }
 
   buildTownActors();
@@ -2053,9 +1692,9 @@ function buildTown() {
 
 function buildWorld() {
   buildLighting();
-  const wallMaterial = buildCrypt();
+  buildCrypt();
   buildChests();
-  buildGates(wallMaterial);
+  buildGates();
   buildActors();
   buildTown();
   buildBlobShadows();
