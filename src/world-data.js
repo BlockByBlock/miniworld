@@ -21,7 +21,13 @@ const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const BOUND_KEYS = ['minX', 'maxX', 'minZ', 'maxZ'];
 const OPENING_DIRECTIONS = new Set(['north', 'south', 'east', 'west']);
 const REQUIRED_ROOM_IDS = ['entrance', 'hub', 'westOssuary', 'eastReliquary', 'northLibrary', 'wardenKeep'];
-const REQUIRED_CHEST_IDS = ['warden-spoils', 'west-seal', 'east-seal'];
+const RESERVED_CHESTS = {
+  'west-seal': { kind: 'seal', roomId: 'westOssuary', branch: 'west' },
+  'east-seal': { kind: 'seal', roomId: 'eastReliquary', branch: 'east' },
+  'archive-key': { kind: 'archive', roomId: 'northLibrary', branch: null },
+  'warden-spoils': { kind: 'final', roomId: 'wardenKeep', branch: null },
+};
+const REQUIRED_CHEST_IDS = Object.keys(RESERVED_CHESTS);
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -173,15 +179,21 @@ function validateCorridors(corridors, roomsById, errors) {
       return roomsById.get(roomId);
     });
     if (!boundsValid || connectedRooms.some((room) => room === null)) continue;
-    for (const [roomIndex, room] of connectedRooms.entries()) {
-      if (!isRecord(room.bounds) || !BOUND_KEYS.every((key) => isFiniteNumber(room.bounds[key]))) continue;
-      const overlapX = Math.min(corridor.bounds.maxX, room.bounds.maxX)
-        - Math.max(corridor.bounds.minX, room.bounds.minX);
-      const overlapZ = Math.min(corridor.bounds.maxZ, room.bounds.maxZ)
-        - Math.max(corridor.bounds.minZ, room.bounds.minZ);
-      if (!(overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5))) {
-        errors.add(`${path}.connects[${roomIndex}]`, `does not geometrically overlap room ${room.id}`);
-      }
+    const geometricNeighbors = [...roomsById.values()]
+      .filter((room) => isRecord(room.bounds) && BOUND_KEYS.every((key) => isFiniteNumber(room.bounds[key])))
+      .filter((room) => {
+        const overlapX = Math.min(corridor.bounds.maxX, room.bounds.maxX)
+          - Math.max(corridor.bounds.minX, room.bounds.minX);
+        const overlapZ = Math.min(corridor.bounds.maxZ, room.bounds.maxZ)
+          - Math.max(corridor.bounds.minZ, room.bounds.minZ);
+        return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
+      })
+      .map((room) => room.id)
+      .sort();
+    const declaredNeighbors = [...new Set(corridor.connects)].sort();
+    if (declaredNeighbors.length !== geometricNeighbors.length
+      || declaredNeighbors.some((roomId, roomIndex) => roomId !== geometricNeighbors[roomIndex])) {
+      errors.add(`${path}.connects`, `must match geometric room neighbors (${geometricNeighbors.join(', ') || 'none'})`);
     }
   }
 }
@@ -302,9 +314,9 @@ function validateWorldDataInternal(raw, options, errors) {
   const corridors = Array.isArray(raw.corridors) ? raw.corridors : [];
   const enemySpawns = Array.isArray(raw.enemySpawns) ? raw.enemySpawns : [];
   const chests = Array.isArray(raw.chests) ? raw.chests : [];
-  const town = isRecord(raw.town) ? raw.town : {};
-  const placements = Array.isArray(town.placements) ? town.placements : [];
-  const npcs = Array.isArray(town.npcs) ? town.npcs : [];
+  const town = isRecord(raw.town) ? raw.town : null;
+  const placements = town?.placements;
+  const npcs = town?.npcs;
 
   validateUniqueIds('rooms', rooms, errors);
   validateUniqueIds('corridors', corridors, errors);
@@ -316,6 +328,8 @@ function validateWorldDataInternal(raw, options, errors) {
   validateEnemyProfiles(profiles, errors);
   validateBounds('world', raw.world, errors);
   if (isRecord(raw.town)) validateBounds('town.bounds', town.bounds, errors);
+  if (!Array.isArray(placements)) errors.add('town.placements', 'expected an array');
+  if (!Array.isArray(npcs)) errors.add('town.npcs', 'expected an array');
   validateRooms(rooms, errors);
   const roomsById = new Map(rooms.filter(isRecord).filter((room) => typeof room.id === 'string').map((room) => [room.id, room]));
   validateCorridors(corridors, roomsById, errors);
@@ -342,29 +356,33 @@ function validateWorldDataInternal(raw, options, errors) {
     if (chest.kind !== 'seal' && chest.branch !== null && chest.branch !== undefined) errors.add(`${path}.branch`, 'only seal chests may have a branch');
   }
 
-  for (const [index, placement] of placements.entries()) {
-    const path = `town.placements[${index}]`;
-    validateActorRecord(path, placement, assets, errors);
-    if (!isRecord(placement)) continue;
-    for (const field of ['width', 'height', 'colliderWidth', 'colliderDepth']) {
-      if (placement[field] !== undefined) validatePositiveNumber(`${path}.${field}`, placement[field], errors);
+  if (Array.isArray(placements)) {
+    for (const [index, placement] of placements.entries()) {
+      const path = `town.placements[${index}]`;
+      validateActorRecord(path, placement, assets, errors);
+      if (!isRecord(placement)) continue;
+      for (const field of ['width', 'height', 'colliderWidth', 'colliderDepth']) {
+        if (placement[field] !== undefined) validatePositiveNumber(`${path}.${field}`, placement[field], errors);
+      }
+      if (placement.rotationY !== undefined && !isFiniteNumber(placement.rotationY)) errors.add(`${path}.rotationY`, 'expected a finite number');
     }
-    if (placement.rotationY !== undefined && !isFiniteNumber(placement.rotationY)) errors.add(`${path}.rotationY`, 'expected a finite number');
   }
-  for (const [index, npc] of npcs.entries()) {
-    const path = `town.npcs[${index}]`;
-    validateActorRecord(path, npc, assets, errors);
-    if (!isRecord(npc)) continue;
-    if (typeof npc.name !== 'string' || npc.name.length === 0) errors.add(`${path}.name`, 'expected a non-empty string');
-    if (npc.role !== undefined && typeof npc.role !== 'string') errors.add(`${path}.role`, 'expected a string');
-    if (npc.patrol !== undefined) {
-      if (!isRecord(npc.patrol)) {
-        errors.add(`${path}.patrol`, 'expected an object');
-      } else {
-        if (!Array.isArray(npc.patrol.waypoints) || npc.patrol.waypoints.length < 2) errors.add(`${path}.patrol.waypoints`, 'expected at least two positions');
-        else npc.patrol.waypoints.forEach((position, waypointIndex) => validatePosition(`${path}.patrol.waypoints[${waypointIndex}]`, position, errors));
-        validatePositiveNumber(`${path}.patrol.speed`, npc.patrol.speed, errors);
-        if (!isFiniteNumber(npc.patrol.pause) || npc.patrol.pause < 0) errors.add(`${path}.patrol.pause`, 'expected a non-negative finite number');
+  if (Array.isArray(npcs)) {
+    for (const [index, npc] of npcs.entries()) {
+      const path = `town.npcs[${index}]`;
+      validateActorRecord(path, npc, assets, errors);
+      if (!isRecord(npc)) continue;
+      if (typeof npc.name !== 'string' || npc.name.length === 0) errors.add(`${path}.name`, 'expected a non-empty string');
+      if (npc.role !== undefined && typeof npc.role !== 'string') errors.add(`${path}.role`, 'expected a string');
+      if (npc.patrol !== undefined) {
+        if (!isRecord(npc.patrol)) {
+          errors.add(`${path}.patrol`, 'expected an object');
+        } else {
+          if (!Array.isArray(npc.patrol.waypoints) || npc.patrol.waypoints.length < 2) errors.add(`${path}.patrol.waypoints`, 'expected at least two positions');
+          else npc.patrol.waypoints.forEach((position, waypointIndex) => validatePosition(`${path}.patrol.waypoints[${waypointIndex}]`, position, errors));
+          validatePositiveNumber(`${path}.patrol.speed`, npc.patrol.speed, errors);
+          if (!isFiniteNumber(npc.patrol.pause) || npc.patrol.pause < 0) errors.add(`${path}.patrol.pause`, 'expected a non-negative finite number');
+        }
       }
     }
   }
@@ -379,8 +397,20 @@ function validateWorldDataInternal(raw, options, errors) {
   }
 
   for (const roomId of REQUIRED_ROOM_IDS) if (!roomsById.has(roomId)) errors.add('rooms', `missing progression room ${roomId}`);
-  const chestIds = new Set(chests.filter(isRecord).map((chest) => chest.id));
-  for (const chestId of REQUIRED_CHEST_IDS) if (!chestIds.has(chestId)) errors.add('chests', `missing progression chest ${chestId}`);
+  for (const chestId of REQUIRED_CHEST_IDS) {
+    const chestIndex = chests.findIndex((chest) => isRecord(chest) && chest.id === chestId);
+    if (chestIndex < 0) {
+      errors.add('chests', `missing progression chest ${chestId}`);
+      continue;
+    }
+    const chest = chests[chestIndex];
+    const expected = RESERVED_CHESTS[chestId];
+    for (const field of ['kind', 'roomId', 'branch']) {
+      if (chest[field] !== expected[field]) {
+        errors.add(`chests[${chestIndex}] (${chestId}).${field}`, `must equal ${expected[field] ?? 'null'} for reserved progression chest ${chestId}`);
+      }
+    }
+  }
 
   const assetPaths = options?.assetPaths;
   if (assetPaths !== undefined && !(assetPaths instanceof Set)) errors.add('options.assetPaths', 'expected a Set when supplied');

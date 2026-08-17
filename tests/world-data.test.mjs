@@ -48,6 +48,50 @@ test('rejects invalid corridor topology and geometry', () => {
   assert.throws(() => validateWorldData(copy), /corridors\[0\].*exactly two/i);
 });
 
+test('rejects corridors with a third geometric room neighbor', () => {
+  const copy = structuredClone(WORLD_DATA.raw);
+  copy.rooms.push({
+    id: 'third-room',
+    label: 'Third Room',
+    branch: null,
+    bounds: { minX: -4, maxX: 4, minZ: 18, maxZ: 22 },
+    openings: {},
+  });
+  assert.throws(() => validateWorldData(copy), /corridors\[0\].*geometric.*neighbor/i);
+});
+
+test('rejects malformed town placements', () => {
+  const copy = structuredClone(WORLD_DATA.raw);
+  copy.town.placements = null;
+  assert.throws(() => validateWorldData(copy), /town\.placements.*array/i);
+});
+
+test('rejects malformed town NPCs', () => {
+  const copy = structuredClone(WORLD_DATA.raw);
+  delete copy.town.npcs;
+  assert.throws(() => validateWorldData(copy), /town\.npcs.*array/i);
+});
+
+test('rejects reserved progression chest mismatches', () => {
+  const mismatches = [
+    ['west-seal', 'branch', 'east'],
+    ['east-seal', 'kind', 'cache'],
+    ['archive-key', 'roomId', 'hub'],
+    ['warden-spoils', 'branch', 'north'],
+  ];
+  for (const [id, field, value] of mismatches) {
+    const copy = structuredClone(WORLD_DATA.raw);
+    copy.chests.find((chest) => chest.id === id)[field] = value;
+    assert.throws(() => validateWorldData(copy), new RegExp(`${id}.*${field}`, 'i'));
+  }
+});
+
+test('rejects renamed reserved progression chests', () => {
+  const copy = structuredClone(WORLD_DATA.raw);
+  copy.chests.find((chest) => chest.id === 'west-seal').id = 'renamed-seal';
+  assert.throws(() => validateWorldData(copy), /missing progression chest west-seal/i);
+});
+
 test('rejects unsafe or missing asset paths', () => {
   const copy = structuredClone(WORLD_DATA.raw);
   copy.assets.knight = '/assets/../secret.glb';
