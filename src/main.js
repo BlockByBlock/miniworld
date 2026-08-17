@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
@@ -58,305 +59,32 @@ const FULL_ANIMATION_DISTANCE_SQ = 30 ** 2;
 const ENEMY_SIMULATION_DISTANCE_SQ = 18 ** 2;
 const ENEMY_RENDER_DISTANCE_SQ = 34 ** 2;
 
-const ACTIONS = {
-  sword: { cooldown: 0.7, range: 3.45 },
-  fire: { cooldown: 3.8, range: 8.5 },
-  freeze: { cooldown: 7.5, range: 8.5 },
-  heal: { cooldown: 14, range: 0 },
-  buff: { cooldown: 18, range: 0 },
-};
+const ASSETS = WORLD_DATA.assets;
+const ACTIONS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, {
+  cooldown: action.cooldown,
+  range: action.range,
+}]));
 const HEAL_FRACTION = 0.3;
-
-const ACTION_NAMES = {
-  sword: 'Sword',
-  fire: 'Fire',
-  freeze: 'Frostbolt',
-  heal: 'Heal',
-  buff: 'Ward',
-};
-
-const ACTION_BAR_KEYS = {
-  sword: ['Digit1', 'Numpad1'],
-  fire: ['Digit2', 'Numpad2'],
-  freeze: ['Digit3', 'Numpad3'],
-  heal: ['Digit4', 'Numpad4'],
-  buff: ['Digit5', 'Numpad5'],
-};
+const ACTION_NAMES = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.name]));
+const ACTION_BAR_KEYS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.keys]));
 
 const ACTION_BY_KEY = new Map(
   Object.entries(ACTION_BAR_KEYS).flatMap(([action, codes]) => codes.map((code) => [code, action])),
 );
 
-const SPELL_COLORS = {
-  fire: 0xff7a2a,
-  freeze: 0x9fd8f0,
-  heal: 0x8ed9a8,
-  buff: 0xc9a6ff,
-};
+const SPELL_COLORS = Object.fromEntries(Object.entries(WORLD_DATA.actions)
+  .filter(([, action]) => action.spellColor)
+  .map(([id, action]) => [id, action.spellColor]));
+const SPELL_CAST_TIMES = Object.fromEntries(Object.entries(WORLD_DATA.actions)
+  .filter(([, action]) => action.castTime !== undefined)
+  .map(([id, action]) => [id, action.castTime]));
+const ITEM_DEFS = WORLD_DATA.items;
+const ENEMY_PROFILES = WORLD_DATA.enemyProfiles;
+const WORLD = WORLD_DATA.world;
+const TOWN_WORLD = WORLD_DATA.town.bounds;
+const MAP = WORLD_DATA.map;
+const ROOM_BRANCH = WORLD_DATA.roomBranch;
 
-const SPELL_CAST_TIMES = {
-  fire: 0.32,
-  freeze: 0.48,
-  heal: 0.44,
-  buff: 0.36,
-};
-
-const ITEM_DEFS = {
-  healingDraft: {
-    name: 'Gravebloom Draft',
-    kind: 'consumable',
-    rarity: 'common',
-    glyph: '✚',
-    color: '#91cfa7',
-    description: 'Restore 30 vitality.',
-  },
-  ossuaryEdge: {
-    name: 'Ossuary Edge',
-    kind: 'equipment',
-    rarity: 'uncommon',
-    glyph: '⚔',
-    color: '#8fc8bd',
-    description: 'Sword damage +20%.',
-    damage: { sword: 1.2 },
-  },
-  emberCharm: {
-    name: 'Ember Charm',
-    kind: 'equipment',
-    rarity: 'rare',
-    glyph: '✹',
-    color: '#d68b65',
-    description: 'Fire damage +25%.',
-    damage: { fire: 1.25 },
-  },
-  frostRune: {
-    name: 'Rimebound Rune',
-    kind: 'equipment',
-    rarity: 'rare',
-    glyph: '❄',
-    color: '#87c8e8',
-    description: 'Frostbolt cooldown -25%.',
-    cooldown: { freeze: 0.75 },
-  },
-  wardenRelic: {
-    name: 'Warden Relic',
-    kind: 'equipment',
-    rarity: 'epic',
-    glyph: '◆',
-    color: '#c49ae6',
-    description: 'All damage +12%.',
-    damage: { sword: 1.12, fire: 1.12, freeze: 1.12 },
-  },
-};
-
-const ENEMY_PROFILES = {
-  guard: { kind: 'melee', damage: 2, desiredRange: 1.72, attackRange: 2.25, attackCooldown: 1.9, windup: 0.32, leash: 9 },
-  rusher: { kind: 'melee', damage: 3, desiredRange: 1.6, attackRange: 2.2, attackCooldown: 1.65, windup: 0.24, chaseMult: 1.55, leash: 10 },
-  pulser: { kind: 'pulse', damage: 5, desiredRange: 5.4, attackRange: 7.2, attackCooldown: 3.6, windup: 0.9, radius: 1.8, leash: 8 },
-  support: { kind: 'support', damage: 3, desiredRange: 5.8, attackRange: 7.5, attackCooldown: 4.2, windup: 0.95, radius: 1.35, heal: 10, leash: 8 },
-  warden: { kind: 'warden', damage: 5, desiredRange: 1.9, attackRange: 2.5, attackCooldown: 2.15, windup: 0.38, leash: 11, slamCooldown: 6.4 },
-};
-
-const ROOM_BRANCH = {
-  westGate: 'west',
-  westBurial: 'west',
-  westOssuary: 'west',
-  eastGate: 'east',
-  eastFlooded: 'east',
-  eastReliquary: 'east',
-  northHall: 'north',
-  northLibrary: 'north',
-  wardenKeep: 'north',
-};
-
-const ASSETS = {
-  knight: '/assets/models/chars/players/knight.glb',
-  ranger: '/assets/models/chars/players/ranger.glb',
-  rogue: '/assets/models/chars/players/rogue.glb',
-  sword: '/assets/models/weapons/sword_1handed.glb',
-  skeletonWarrior: '/assets/models/chars/enemies/skeleton_warrior.glb',
-  skeletonGolem: '/assets/models/chars/enemies/skeleton_golem.glb',
-  skeletonMage: '/assets/models/chars/enemies/skeleton_mage.glb',
-  skeletonRogue: '/assets/models/chars/enemies/skeleton_rogue.glb',
-  skeletonMinion: '/assets/models/chars/enemies/skeleton_minion.glb',
-  floorTile: '/assets/models/dungeon/floor_tile_small.glb',
-  archGate: '/assets/models/dungeon/arch_gate.glb',
-  torch: '/assets/models/dungeon/torch_lit.glb',
-  chest: '/assets/models/dungeon/chest.glb',
-  chestGold: '/assets/models/dungeon/chest_gold.glb',
-  column: '/assets/models/dungeon/column.glb',
-  crypt: '/assets/models/dungeon/crypt.glb',
-  barrelStack: '/assets/models/dungeon/barrel_small_stack.glb',
-  boneA: '/assets/models/dungeon/bone_A.glb',
-  boneB: '/assets/models/dungeon/bone_B.glb',
-  boneC: '/assets/models/dungeon/bone_c.glb',
-  bookcase: '/assets/models/dungeon/bookcase_double_decorateda.glb',
-  candleTriple: '/assets/models/dungeon/candle_triple.glb',
-  coffin: '/assets/models/dungeon/coffin_decorated.glb',
-  crateStack: '/assets/models/dungeon/crates_stacked.glb',
-  brokenFloorA: '/assets/models/dungeon/floor_tile_small_broken_A.glb',
-  brokenFloorB: '/assets/models/dungeon/floor_tile_small_broken_B.glb',
-  rubbleHalf: '/assets/models/dungeon/rubble_half.glb',
-  rubbleLarge: '/assets/models/dungeon/rubble_large.glb',
-  skull: '/assets/models/dungeon/skull.glb',
-  skullCandle: '/assets/models/dungeon/skull_candle.glb',
-  brokenTable: '/assets/models/dungeon/table_long_broken.glb',
-  cobweb: '/assets/models/biome/dungeon_cobweb.glb',
-  coins: '/assets/models/biome/dungeon_coins.glb',
-  horseStatue: '/assets/models/biome/dungeon_statue_horse.glb',
-  woodSupport: '/assets/models/biome/dungeon_wood_support.glb',
-  townHomeA: '/assets/models/biome/hex_home_a.glb',
-  townHomeB: '/assets/models/biome/hex_home_b.glb',
-  townTavern: '/assets/models/biome/hex_tavern.glb',
-  townMarket: '/assets/models/biome/hex_market.glb',
-  townBlacksmith: '/assets/models/biome/hex_blacksmith.glb',
-  townWell: '/assets/models/biome/hex_well.glb',
-  townArcheryRange: '/assets/models/biome/hexr_archeryrange.glb',
-  townTarget: '/assets/models/biome/hex_target.glb',
-  townGrassTile: '/assets/models/biome/hex_tile_grass.glb',
-  townRoadTile: '/assets/models/biome/hex_tile_road.glb',
-  townBarrel: '/assets/models/biome/kcas_barrel.glb',
-  townBench: '/assets/models/biome/kcas_bench.glb',
-  townCart: '/assets/models/props/cart.glb',
-  townFence: '/assets/models/props/fence.glb',
-  townMarketStandA: '/assets/models/props/market_stand_1.glb',
-  townMarketStandB: '/assets/models/props/market_stand_2.glb',
-  townVillageWell: '/assets/models/props/well.glb',
-};
-
-const WORLD = {
-  minX: -59,
-  maxX: 59,
-  minZ: -51,
-  maxZ: 37,
-};
-
-const TOWN_WORLD = {
-  minX: -18,
-  maxX: 18,
-  minZ: -15,
-  maxZ: 16,
-};
-
-const MAP = {
-  rooms: [
-    {
-      id: 'entrance',
-      label: 'Entrance Vault',
-      minX: -10,
-      maxX: 10,
-      minZ: 20,
-      maxZ: 34,
-      openings: { north: [[-4, 4]] },
-    },
-    {
-      id: 'hub',
-      label: 'The Bell Hub',
-      minX: -14,
-      maxX: 14,
-      minZ: 2,
-      maxZ: 18,
-      openings: {
-        south: [[-4, 4]],
-        west: [[4, 12]],
-        east: [[4, 12]],
-        north: [[-4, 4]],
-      },
-    },
-    {
-      id: 'westGate',
-      label: 'Burial Hall',
-      minX: -34,
-      maxX: -18,
-      minZ: 2,
-      maxZ: 16,
-      openings: { east: [[4, 12]], west: [[4, 12]] },
-    },
-    {
-      id: 'westBurial',
-      label: 'Ashen Gallery',
-      minX: -56,
-      maxX: -38,
-      minZ: 2,
-      maxZ: 16,
-      openings: { east: [[4, 12]], north: [[-50, -44]] },
-    },
-    {
-      id: 'westOssuary',
-      label: 'The Ossuary',
-      minX: -56,
-      maxX: -38,
-      minZ: -16,
-      maxZ: 0,
-      openings: { south: [[-50, -44]] },
-    },
-    {
-      id: 'eastGate',
-      label: 'Flooded Hall',
-      minX: 18,
-      maxX: 34,
-      minZ: 2,
-      maxZ: 16,
-      openings: { west: [[4, 12]], east: [[4, 12]] },
-    },
-    {
-      id: 'eastFlooded',
-      label: 'Drowned Gallery',
-      minX: 38,
-      maxX: 56,
-      minZ: 2,
-      maxZ: 16,
-      openings: { west: [[4, 12]], north: [[44, 50]] },
-    },
-    {
-      id: 'eastReliquary',
-      label: 'The Reliquary',
-      minX: 38,
-      maxX: 56,
-      minZ: -16,
-      maxZ: 0,
-      openings: { south: [[44, 50]] },
-    },
-    {
-      id: 'northHall',
-      label: 'Catacomb Crossing',
-      minX: -12,
-      maxX: 12,
-      minZ: -16,
-      maxZ: -4,
-      openings: { south: [[-4, 4]], north: [[-4, 4]] },
-    },
-    {
-      id: 'northLibrary',
-      label: 'The Silent Archive',
-      minX: -12,
-      maxX: 12,
-      minZ: -32,
-      maxZ: -18,
-      openings: { south: [[-4, 4]], north: [[-4, 4]] },
-    },
-    {
-      id: 'wardenKeep',
-      label: 'Warden\'s Keep',
-      minX: -16,
-      maxX: 16,
-      minZ: -50,
-      maxZ: -34,
-      openings: { south: [[-4, 4]] },
-    },
-  ],
-  corridors: [
-    { id: 'entry-corridor', minX: -4, maxX: 4, minZ: 18, maxZ: 22 },
-    { id: 'west-corridor', minX: -18, maxX: -14, minZ: 4, maxZ: 12 },
-    { id: 'west-deep-corridor', minX: -38, maxX: -34, minZ: 4, maxZ: 12 },
-    { id: 'west-drop', minX: -50, maxX: -44, minZ: -2, maxZ: 4 },
-    { id: 'east-corridor', minX: 14, maxX: 18, minZ: 4, maxZ: 12 },
-    { id: 'east-deep-corridor', minX: 34, maxX: 38, minZ: 4, maxZ: 12 },
-    { id: 'east-drop', minX: 44, maxX: 50, minZ: -2, maxZ: 4 },
-    { id: 'north-corridor', minX: -4, maxX: 4, minZ: -4, maxZ: 2 },
-    { id: 'archive-corridor', minX: -4, maxX: 4, minZ: -18, maxZ: -14 },
-    { id: 'warden-corridor', minX: -4, maxX: 4, minZ: -34, maxZ: -30 },
-  ],
-};
 MAP.zones = [...MAP.rooms, ...MAP.corridors];
 const corridorZones = new Set(MAP.corridors);
 const ZONE_BY_ID = new Map(MAP.zones.map((zone) => [zone.id, zone]));
@@ -1654,30 +1382,26 @@ function spawnActor({ assetKey, type, name, role, x, z, height, maxHp, speed, pr
 }
 
 function buildChests() {
-  const chestSpawns = [
-    { id: 'hub-cache', name: 'Bell Hub cache', x: 0, z: 14.2, roomId: 'hub', kind: 'cache' },
-    { id: 'ashen-cache', name: 'Ashen Gallery cache', x: -47, z: 10, roomId: 'westBurial', kind: 'cache' },
-    { id: 'west-seal', name: 'Ossuary reliquary', x: -47, z: -13, roomId: 'westOssuary', kind: 'seal', branch: 'west' },
-    { id: 'drowned-cache', name: 'Drowned Gallery cache', x: 47, z: 10, roomId: 'eastFlooded', kind: 'cache' },
-    { id: 'east-seal', name: 'Reliquary vault', x: 47, z: -12.5, roomId: 'eastReliquary', kind: 'seal', branch: 'east' },
-    { id: 'archive-key', name: 'Silent Archive cache', x: 0, z: -27, roomId: 'northLibrary', kind: 'archive' },
-    { id: 'warden-spoils', name: "Warden's spoils", x: 0, z: -47.5, roomId: 'wardenKeep', kind: 'final' },
-  ];
-  state.chests = chestSpawns.map((chest) => ({
-    ...chest,
-    position: new THREE.Vector3(chest.x, 0, chest.z),
-    root: createStatic('chest', {
-      x: chest.x,
-      z: chest.z,
-      width: 1.35,
-      height: 1.05,
-      parent: zoneRenderGroups.get(chest.roomId),
-      colliderWidth: 1.25,
-      colliderDepth: 0.9,
-    }),
-    opened: false,
-    rewardRoot: null,
-  }));
+  state.chests = WORLD_DATA.chests.map((chest) => {
+    const [x, z] = chest.position;
+    return {
+      ...chest,
+      x,
+      z,
+      position: new THREE.Vector3(x, 0, z),
+      root: createStatic('chest', {
+        x,
+        z,
+        width: 1.35,
+        height: 1.05,
+        parent: zoneRenderGroups.get(chest.roomId),
+        colliderWidth: 1.25,
+        colliderDepth: 0.9,
+      }),
+      opened: false,
+      rewardRoot: null,
+    };
+  });
   state.openedChests = 0;
 }
 
@@ -1884,145 +1608,47 @@ function buildGates(wallMaterial) {
 
 function buildActors() {
   player = spawnActor({
-    assetKey: 'knight',
+    ...WORLD_DATA.player,
     type: 'player',
-    name: 'Cryptwalker',
-    x: 0,
-    z: 12.0,
-    height: 1.85,
-    maxHp: 100,
-    speed: 4.2,
     sceneRoot: townScene,
   });
-  const enemySpawns = [
-    ['Boneguard Captain', -31, 9, 'guard', 'westGate', 'skeletonMinion'],
-    ['Burial Hall Reaver', -27, 7, 'rusher', 'westGate', 'skeletonRogue'],
-    ['Sepulcher Watch', -23, 10, 'guard', 'westGate'],
-    ['Dustbound Ringer', -20, 7, 'pulser', 'westGate', 'skeletonMage'],
-    ['Ashen Sentry', -54, 10, 'guard', 'westBurial'],
-    ['Cinderblade', -50, 9, 'rusher', 'westBurial'],
-    ['Gallery Keeper', -44, 10, 'support', 'westBurial'],
-    ['Ember Husk', -40, 9, 'rusher', 'westBurial'],
-    ['Ossuary Ringer', -52, -9, 'pulser', 'westOssuary'],
-    ['Marrow Guard', -43, -9, 'guard', 'westOssuary'],
-    ['Bone Collector', -50, -3, 'support', 'westOssuary'],
-    ['Sepulcher Fang', -42, -12, 'rusher', 'westOssuary'],
-    ['Flooded Hall Guard', 20, 9, 'guard', 'eastGate'],
-    ['Brine Reaver', 24, 8, 'rusher', 'eastGate'],
-    ['Sunken Watch', 29, 10, 'guard', 'eastGate'],
-    ['Tide Ringer', 32, 7, 'pulser', 'eastGate'],
-    ['Drowned Ringer', 40, 10, 'pulser', 'eastFlooded'],
-    ['Siltwalker', 44, 9, 'rusher', 'eastFlooded'],
-    ['Gallery Acolyte', 50, 10, 'support', 'eastFlooded'],
-    ['Brinebound', 54, 9, 'guard', 'eastFlooded'],
-    ['Reliquary Acolyte', 40, -9, 'support', 'eastReliquary'],
-    ['Gilded Guard', 44, -5, 'guard', 'eastReliquary'],
-    ['Vault Reaver', 50, -5, 'rusher', 'eastReliquary'],
-    ['Relic Ringer', 54, -10, 'pulser', 'eastReliquary'],
-    ['Catacomb Pursuer', -7, -10, 'rusher', 'northHall'],
-    ['Crossing Guard', 7, -10, 'guard', 'northHall'],
-    ['Grave Bolt Acolyte', -5, -6, 'support', 'northHall'],
-    ['Catacomb Ringer', 5, -14, 'pulser', 'northHall'],
-    ['Archive Acolyte', -5, -23, 'support', 'northLibrary', 'skeletonMage'],
-    ['Silent Reaver', 5, -23, 'rusher', 'northLibrary', 'skeletonRogue'],
-    ['Index Guard', -4, -28, 'guard', 'northLibrary'],
-    ['Dust Scribe', 4, -20, 'pulser', 'northLibrary'],
-    ['Warden Vanguard', -5, -41, 'guard', 'wardenKeep'],
-    ['Warden Reaver', 5, -41, 'rusher', 'wardenKeep'],
-    ['Warden Acolyte', 0, -45, 'support', 'wardenKeep'],
-  ];
-  for (const [name, x, z, profileKey, roomId, assetKey = 'skeletonWarrior'] of enemySpawns) {
-    const profileStats = profileKey === 'rusher'
-      ? { maxHp: 200, speed: 1.18 }
-      : profileKey === 'pulser'
-        ? { maxHp: 300, speed: 0.9 }
-        : profileKey === 'support'
-          ? { maxHp: 280, speed: 0.92 }
-          : { maxHp: 250, speed: 1.05 };
+  for (const spawn of WORLD_DATA.enemySpawns) {
+    const profile = ENEMY_PROFILES[spawn.profileKey];
+    const [x, z] = spawn.position;
     enemies.push(spawnActor({
-      assetKey,
+      assetKey: spawn.assetKey,
       type: 'enemy',
-      name,
+      name: spawn.name,
       x,
       z,
-      height: 1.8,
-      profileKey,
-      roomId,
-      ...profileStats,
+      height: spawn.height,
+      maxHp: profile.maxHp,
+      speed: profile.speed,
+      profileKey: spawn.profileKey,
+      roomId: spawn.roomId,
     }));
   }
-  enemies.push(spawnActor({
-    assetKey: 'skeletonGolem',
-    type: 'enemy',
-    name: 'Crypt Warden',
-    x: 0,
-    z: -40,
-    height: 2.2,
-    maxHp: 2000,
-    speed: 0.72,
-    profileKey: 'warden',
-    roomId: 'wardenKeep',
-  }));
 }
 
 function buildTownActors() {
-  const rowan = spawnActor({
-    assetKey: 'ranger',
-    type: 'npc',
-    name: 'Ranger Rowan',
-    role: 'Hunter',
-    x: 0,
-    z: 10.15,
-    height: 1.85,
-    sceneRoot: townScene,
-  });
-  const elin = spawnActor({
-    assetKey: 'knight',
-    type: 'npc',
-    name: 'Guard Elin',
-    role: 'Town guard',
-    x: -7.1,
-    z: 3.8,
-    height: 1.8,
-    sceneRoot: townScene,
-  });
-  const vale = spawnActor({
-    assetKey: 'rogue',
-    type: 'npc',
-    name: 'Tinker Vale',
-    role: 'Artificer',
-    x: 6.6,
-    z: 3.8,
-    height: 1.75,
-    sceneRoot: townScene,
-  });
-  townNpcs.push(rowan, elin, vale);
-  configureTownPatrol(elin, [
-    { x: -6.6, z: 3.8 },
-    { x: -2.2, z: 3.8 },
-    { x: -2.2, z: 5.8 },
-    { x: 0, z: 5.8 },
-    { x: 0, z: 12.8 },
-    { x: 2.2, z: 12.8 },
-    { x: 2.2, z: 5.8 },
-    { x: 2.2, z: 3.8 },
-    { x: 6.6, z: 3.8 },
-    { x: 2.2, z: 3.8 },
-    { x: 2.2, z: 5.8 },
-    { x: 0, z: 5.8 },
-    { x: -2.2, z: 5.8 },
-    { x: -2.2, z: 3.8 },
-  ], { speed: 1.25, pause: 0.45 });
-  configureTownPatrol(vale, [
-    { x: 2.8, z: 3.8 },
-    { x: 6.6, z: 3.8 },
-  ], { speed: 0.9, pause: 0.8 });
-  configureTownPatrol(rowan, [
-    { x: 0, z: 13.1 },
-    { x: 0, z: 10.2 },
-    { x: 3.7, z: 10.2 },
-    { x: 0, z: 10.2 },
-  ], { speed: 1.1, pause: 0.7 });
+  for (const npcData of WORLD_DATA.town.npcs) {
+    const { position, patrol, ...actorData } = npcData;
+    const [x, z] = position;
+    const npc = spawnActor({
+      ...actorData,
+      type: 'npc',
+      x,
+      z,
+      sceneRoot: townScene,
+    });
+    townNpcs.push(npc);
+    if (patrol) {
+      configureTownPatrol(npc, patrol.waypoints.map(([waypointX, waypointZ]) => ({ x: waypointX, z: waypointZ })), {
+        speed: patrol.speed,
+        pause: patrol.pause,
+      });
+    }
+  }
   townNpcs.forEach((npc) => {
     npc.awake = true;
     npc.play(['idle', 'idle_combat'], { force: true });
@@ -2113,27 +1739,10 @@ function buildTown() {
   addTownBox({ x: 0, y: -0.012, z: 3.8, width: 30, height: 0.06, depth: 3.1, material: roadMaterial });
   addTownBox({ x: 0, y: 0.01, z: 3.8, width: 1.15, height: 0.08, depth: 23, material: roadEdgeMaterial });
 
-  createTownStatic('townHomeA', { x: -10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8 });
-  createTownStatic('townHomeB', { x: 10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8 });
-  createTownStatic('townTavern', { x: 0, z: -8.5, height: 4.8, colliderWidth: 6.3, colliderDepth: 5.4 });
-  createTownStatic('townMarket', { x: -10.1, z: 8, height: 3.8, rotationY: Math.PI, colliderWidth: 5.1, colliderDepth: 3.4 });
-  createTownStatic('townBlacksmith', { x: 10.1, z: 3.8, height: 3.8, colliderWidth: 5.1, colliderDepth: 3.4 });
-  createTownStatic('townWell', { x: 0, z: 3.4, height: 2.9, colliderWidth: 2.8, colliderDepth: 2.8 });
-  createTownStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 5, rotationY: Math.PI / 2 });
-  createTownStatic('townTarget', { x: 8.1, z: 10.2, height: 1.7, rotationY: Math.PI / 2 });
-  createTownStatic('archGate', { x: 0, z: 14.2, width: 4.8, height: 4.4 });
-  createTownStatic('townMarketStandA', { x: -12.2, z: 0.8, height: 2.1, rotationY: Math.PI / 2 });
-  createTownStatic('townMarketStandB', { x: -9.4, z: 0.8, height: 1.9, rotationY: Math.PI / 2 });
-  createTownStatic('townCart', { x: -6.7, z: -0.8, height: 2.9, rotationY: 0, colliderWidth: 1.8, colliderDepth: 3.4 });
-  createTownStatic('townBarrel', { x: 7.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
-  createTownStatic('townBarrel', { x: 8.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
-  createTownStatic('townBench', { x: -4.5, z: 8.1, height: 0.8, rotationY: Math.PI / 2 });
-
-  for (const x of [-15, -11, 11, 15]) {
-    createTownStatic('townFence', { x, z: -13.3, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
-  }
-  for (const x of [-15, -11, 11, 15]) {
-    createTownStatic('townFence', { x, z: 15.2, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
+  for (const placement of WORLD_DATA.town.placements) {
+    const { assetKey, position, ...options } = placement;
+    const [x, z] = position;
+    createTownStatic(assetKey, { ...options, x, z });
   }
 
   buildTownActors();

@@ -30,6 +30,27 @@ test('loads the canonical registry and derives runtime maps', () => {
   assert.equal(loadWorldData(WORLD_DATA.raw).roomById instanceof Map, true);
 });
 
+test('exposes the runtime content contracts', () => {
+  assert.deepEqual(Object.keys(WORLD_DATA.actions), ['sword', 'fire', 'freeze', 'heal', 'buff']);
+  assert.deepEqual(Object.keys(WORLD_DATA.items), [
+    'healingDraft',
+    'ossuaryEdge',
+    'emberCharm',
+    'frostRune',
+    'wardenRelic',
+  ]);
+  assert.equal(WORLD_DATA.enemySpawns.length, 36);
+  assert.equal(WORLD_DATA.enemySpawns.filter(({ profileKey }) => profileKey === 'warden').length, 1);
+  assert.equal(WORLD_DATA.enemySpawns.filter(({ name }) => name === 'Crypt Warden').length, 1);
+  assert.equal(WORLD_DATA.chests.length, 7);
+  assert.equal(WORLD_DATA.chests.some(({ id }) => id === 'warden-spoils'), true);
+  assert.deepEqual(WORLD_DATA.town.npcs.map(({ name }) => name), [
+    'Ranger Rowan',
+    'Guard Elin',
+    'Tinker Vale',
+  ]);
+});
+
 test('rejects duplicate content IDs', () => {
   const copy = structuredClone(WORLD_DATA.raw);
   copy.rooms.push(structuredClone(copy.rooms[0]));

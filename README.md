@@ -63,5 +63,7 @@ reliquaries, Archive cache, and Warden spoils drive the required route.
 npm run build
 ```
 
+Stable world content lives in [src/data/world.json](./src/data/world.json) and is validated by `npm test`; its asset keys point to files under `public/assets`, while runtime behavior and rendering remain in `src/main.js`.
+
 See [ASSET_CREDITS.md](./ASSET_CREDITS.md) for the exact source commit and
 license record for the bundled models.
