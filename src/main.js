@@ -4,7 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { brickWallDimensions } from './crypt-wall-geometry.js';
+import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
 import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
@@ -990,13 +990,16 @@ function buildRoomWalls(room) {
   });
 
   const corners = [
-    [room.minX, room.minZ, 0],
-    [room.maxX, room.minZ, -Math.PI / 2],
-    [room.maxX, room.maxZ, Math.PI],
-    [room.minX, room.maxZ, Math.PI / 2],
+    [room.minX, room.minZ, true, true],
+    [room.maxX, room.minZ, false, true],
+    [room.maxX, room.maxZ, false, false],
+    [room.minX, room.maxZ, true, false],
   ];
-  corners.forEach(([x, z, rotationY]) => {
-    addDecoration('wallCorner', x, z, { height: 2.7, rotationY });
+  corners.forEach(([x, z, west, north]) => {
+    addDecoration('wallCorner', x, z, {
+      height: 2.7,
+      rotationY: brickWallCornerRotation({ west, north }),
+    });
   });
 }
 
