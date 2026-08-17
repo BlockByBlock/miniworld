@@ -10,9 +10,14 @@ name and branding are not used by this preview.
 | Local files | Source pack | Author | License |
 | --- | --- | --- | --- |
 | `public/assets/models/chars/players/knight.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/chars/players/ranger.glb`, `rogue.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
 | `public/assets/models/weapons/sword_1handed.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
-| `public/assets/models/chars/enemies/skeleton_warrior.glb`, `skeleton_golem.glb` | KayKit Character Pack Skeletons | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/chars/enemies/skeleton_warrior.glb`, `skeleton_golem.glb`, `skeleton_mage.glb`, `skeleton_rogue.glb`, `skeleton_minion.glb` | KayKit Character Pack Skeletons | Kay Lousberg | CC0 1.0 |
 | `public/assets/models/dungeon/*` | KayKit Dungeon Remastered | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/biome/dungeon_cobweb.glb`, `dungeon_coins.glb`, `dungeon_statue_horse.glb`, `dungeon_wood_support.glb` | Quaternius Modular Dungeons Pack | Quaternius | CC0 1.0 |
+| `public/assets/models/biome/hex_home_a.glb`, `hex_home_b.glb`, `hex_tavern.glb`, `hex_market.glb`, `hex_blacksmith.glb`, `hex_well.glb`, `hexr_archeryrange.glb`, `hex_target.glb`, `hex_tile_grass.glb`, `hex_tile_road.glb` | KayKit Medieval Hexagon Pack | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/biome/kcas_barrel.glb`, `kcas_bench.glb` | KayKit Character Pack Adventures | Kay Lousberg | CC0 1.0 |
+| `public/assets/models/props/cart.glb`, `fence.glb`, `market_stand_1.glb`, `market_stand_2.glb`, `well.glb` | Quaternius Medieval Village Pack | Quaternius | CC0 1.0 |
 
 The models were copied from World of ClaudeCraft at commit
 `7e8c2c3cd8136242a2d8ff29c376dd2bef66f849` on 2026-08-08. The asset register

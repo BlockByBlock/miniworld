@@ -29,16 +29,18 @@ const targetStatus = $('#target-status');
 const playerStatus = $('#player-status');
 const interaction = $('#interaction');
 const toast = $('#toast');
-const actionMenu = $('#action-menu');
-const actionMenuTitle = $('#action-menu-title');
-const actionBubbles = [...actionMenu.querySelectorAll('[data-action]')];
 const abilitySlots = [...document.querySelectorAll('[data-ability]')];
 const minimap = $('#minimap');
 const minimapContext = minimap.getContext('2d');
 const areaName = $('#area-name');
+const minimapLabel = $('#minimap-label');
 const backpackSlots = [...document.querySelectorAll('[data-inventory-slot]')];
 const equippedItem = $('#equipped-item');
-const qualityMode = $('#quality-mode');
+const abilityStrip = $('#ability-strip');
+const backpackCard = $('#backpack-card');
+const dialogueCard = $('#dialogue-card');
+const dialogueName = $('#dialogue-name');
+const dialogueCopy = $('#dialogue-copy');
 
 const MAX_RENDER_PIXEL_RATIO = 1.25;
 const MAX_RENDER_PIXELS = 1920 * 1080;
@@ -49,9 +51,6 @@ const RESOLUTION_UPSHIFT_MS = 17.2;
 const RESOLUTION_STEP_DOWN = 0.1;
 const RESOLUTION_STEP_UP = 0.05;
 const RESOLUTION_CHANGE_COOLDOWN = 1.5;
-const AUTO_BLOB_SCALE_THRESHOLD = 0.75;
-const AUTO_BLOB_SLOW_SAMPLES = 2;
-const AUTO_FULL_RECOVERY_SAMPLES = 6;
 const MAX_BLOB_SHADOWS = 64;
 const ROOM_ENTRY_CLEARANCE = 1.1;
 const DISTANT_ANIMATION_INTERVAL = 0.1;
@@ -65,6 +64,41 @@ const ACTIONS = {
   freeze: { cooldown: 7.5, range: 8.5 },
   heal: { cooldown: 14, range: 0 },
   buff: { cooldown: 18, range: 0 },
+};
+const HEAL_FRACTION = 0.3;
+
+const ACTION_NAMES = {
+  sword: 'Sword',
+  fire: 'Fire',
+  freeze: 'Frostbolt',
+  heal: 'Heal',
+  buff: 'Ward',
+};
+
+const ACTION_BAR_KEYS = {
+  sword: ['Digit1', 'Numpad1'],
+  fire: ['Digit2', 'Numpad2'],
+  freeze: ['Digit3', 'Numpad3'],
+  heal: ['Digit4', 'Numpad4'],
+  buff: ['Digit5', 'Numpad5'],
+};
+
+const ACTION_BY_KEY = new Map(
+  Object.entries(ACTION_BAR_KEYS).flatMap(([action, codes]) => codes.map((code) => [code, action])),
+);
+
+const SPELL_COLORS = {
+  fire: 0xff7a2a,
+  freeze: 0x9fd8f0,
+  heal: 0x8ed9a8,
+  buff: 0xc9a6ff,
+};
+
+const SPELL_CAST_TIMES = {
+  fire: 0.32,
+  freeze: 0.48,
+  heal: 0.44,
+  buff: 0.36,
 };
 
 const ITEM_DEFS = {
@@ -100,7 +134,7 @@ const ITEM_DEFS = {
     rarity: 'rare',
     glyph: '❄',
     color: '#87c8e8',
-    description: 'Freeze cooldown -25%.',
+    description: 'Frostbolt cooldown -25%.',
     cooldown: { freeze: 0.75 },
   },
   wardenRelic: {
@@ -136,9 +170,14 @@ const ROOM_BRANCH = {
 
 const ASSETS = {
   knight: '/assets/models/chars/players/knight.glb',
+  ranger: '/assets/models/chars/players/ranger.glb',
+  rogue: '/assets/models/chars/players/rogue.glb',
   sword: '/assets/models/weapons/sword_1handed.glb',
   skeletonWarrior: '/assets/models/chars/enemies/skeleton_warrior.glb',
   skeletonGolem: '/assets/models/chars/enemies/skeleton_golem.glb',
+  skeletonMage: '/assets/models/chars/enemies/skeleton_mage.glb',
+  skeletonRogue: '/assets/models/chars/enemies/skeleton_rogue.glb',
+  skeletonMinion: '/assets/models/chars/enemies/skeleton_minion.glb',
   floorTile: '/assets/models/dungeon/floor_tile_small.glb',
   archGate: '/assets/models/dungeon/arch_gate.glb',
   torch: '/assets/models/dungeon/torch_lit.glb',
@@ -146,6 +185,42 @@ const ASSETS = {
   chestGold: '/assets/models/dungeon/chest_gold.glb',
   column: '/assets/models/dungeon/column.glb',
   crypt: '/assets/models/dungeon/crypt.glb',
+  barrelStack: '/assets/models/dungeon/barrel_small_stack.glb',
+  boneA: '/assets/models/dungeon/bone_A.glb',
+  boneB: '/assets/models/dungeon/bone_B.glb',
+  boneC: '/assets/models/dungeon/bone_c.glb',
+  bookcase: '/assets/models/dungeon/bookcase_double_decorateda.glb',
+  candleTriple: '/assets/models/dungeon/candle_triple.glb',
+  coffin: '/assets/models/dungeon/coffin_decorated.glb',
+  crateStack: '/assets/models/dungeon/crates_stacked.glb',
+  brokenFloorA: '/assets/models/dungeon/floor_tile_small_broken_A.glb',
+  brokenFloorB: '/assets/models/dungeon/floor_tile_small_broken_B.glb',
+  rubbleHalf: '/assets/models/dungeon/rubble_half.glb',
+  rubbleLarge: '/assets/models/dungeon/rubble_large.glb',
+  skull: '/assets/models/dungeon/skull.glb',
+  skullCandle: '/assets/models/dungeon/skull_candle.glb',
+  brokenTable: '/assets/models/dungeon/table_long_broken.glb',
+  cobweb: '/assets/models/biome/dungeon_cobweb.glb',
+  coins: '/assets/models/biome/dungeon_coins.glb',
+  horseStatue: '/assets/models/biome/dungeon_statue_horse.glb',
+  woodSupport: '/assets/models/biome/dungeon_wood_support.glb',
+  townHomeA: '/assets/models/biome/hex_home_a.glb',
+  townHomeB: '/assets/models/biome/hex_home_b.glb',
+  townTavern: '/assets/models/biome/hex_tavern.glb',
+  townMarket: '/assets/models/biome/hex_market.glb',
+  townBlacksmith: '/assets/models/biome/hex_blacksmith.glb',
+  townWell: '/assets/models/biome/hex_well.glb',
+  townArcheryRange: '/assets/models/biome/hexr_archeryrange.glb',
+  townTarget: '/assets/models/biome/hex_target.glb',
+  townGrassTile: '/assets/models/biome/hex_tile_grass.glb',
+  townRoadTile: '/assets/models/biome/hex_tile_road.glb',
+  townBarrel: '/assets/models/biome/kcas_barrel.glb',
+  townBench: '/assets/models/biome/kcas_bench.glb',
+  townCart: '/assets/models/props/cart.glb',
+  townFence: '/assets/models/props/fence.glb',
+  townMarketStandA: '/assets/models/props/market_stand_1.glb',
+  townMarketStandB: '/assets/models/props/market_stand_2.glb',
+  townVillageWell: '/assets/models/props/well.glb',
 };
 
 const WORLD = {
@@ -153,6 +228,13 @@ const WORLD = {
   maxX: 59,
   minZ: -51,
   maxZ: 37,
+};
+
+const TOWN_WORLD = {
+  minX: -18,
+  maxX: 18,
+  minZ: -15,
+  maxZ: 16,
 };
 
 const MAP = {
@@ -293,6 +375,8 @@ const ZONE_NEIGHBORS = new Map(MAP.zones.map((zone) => {
 
 const state = {
   loaded: false,
+  mode: 'town',
+  teleporting: false,
   started: false,
   combatStarted: false,
   finished: false,
@@ -324,23 +408,24 @@ const state = {
   elapsed: 0,
   uiTimer: 0,
   overlayTimer: 0,
+  dialogueTimer: 0,
   weaponUiSheathed: null,
   resolutionScale: 1,
   frameSampleSeconds: 0,
   frameSampleFrames: 0,
   resolutionCooldown: 0,
   fastFrameSamples: 0,
-  autoBlobSlowSamples: 0,
-  autoFullRecoverySamples: 0,
-  shadowPreference: 'auto',
-  lowQualityShadows: false,
 };
 
 const keys = new Set();
 const assets = new Map();
 const enemies = [];
+const townNpcs = [];
 const staticColliders = [];
+const townStaticColliders = [];
 const effects = [];
+const spellProjectiles = [];
+const spellVisuals = [];
 const telegraphs = [];
 const combatTexts = [];
 const lootDrops = [];
@@ -349,9 +434,13 @@ const visibleZoneIds = new Set();
 
 let activeWorldGroup = null;
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color('#090b14');
-scene.fog = new THREE.FogExp2('#090b14', 0.018);
+const dungeonScene = new THREE.Scene();
+const townScene = new THREE.Scene();
+const scene = dungeonScene;
+dungeonScene.background = new THREE.Color('#090b14');
+dungeonScene.fog = new THREE.FogExp2('#090b14', 0.018);
+townScene.background = new THREE.Color('#6e8f88');
+townScene.fog = new THREE.Fog('#6e8f88', 28, 58);
 
 const camera = new THREE.PerspectiveCamera(43, window.innerWidth / window.innerHeight, 0.1, 100);
 camera.position.set(10.6, 11.5, 12.2);
@@ -370,8 +459,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(rendererPixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.18;
@@ -400,15 +488,26 @@ const tempSize = new THREE.Vector3();
 const raycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
 const projectedAnchor = new THREE.Vector3();
+const spellOrigin = new THREE.Vector3();
+const spellTarget = new THREE.Vector3();
+const movementDirection = new THREE.Vector3();
+const cameraForward = new THREE.Vector3();
+const cameraRight = new THREE.Vector3();
+const worldUp = new THREE.Vector3(0, 1, 0);
 
 let player;
 let toastTimeout;
 let pointerPress = null;
-let actionTarget = null;
+let selectedTarget = null;
 let audioContext = null;
 let noiseBuffer = null;
 let moonLight = null;
 let blobShadowMesh = null;
+let townBlobShadowMesh = null;
+let townWorldGroup = null;
+let wardVisual = null;
+let targetMarker = null;
+let dialogueTimeout;
 
 const blobShadowPosition = new THREE.Vector3();
 const blobShadowScale = new THREE.Vector3();
@@ -480,9 +579,31 @@ function playSfx(name) {
   } else if (name === 'fire') {
     playNoise({ duration: 0.2, gain: 0.025, frequency: 1400 });
     playTone({ frequency: 180, endFrequency: 420, duration: 0.18, gain: 0.026, type: 'sawtooth' });
+  } else if (name === 'cast-fire') {
+    playTone({ frequency: 180, endFrequency: 520, duration: 0.24, gain: 0.018, type: 'sawtooth' });
+  } else if (name === 'fire-launch') {
+    playNoise({ duration: 0.08, gain: 0.018, frequency: 1800 });
+  } else if (name === 'fire-impact') {
+    playNoise({ duration: 0.16, gain: 0.03, frequency: 1200 });
+    playTone({ frequency: 260, endFrequency: 90, duration: 0.18, gain: 0.022, type: 'triangle' });
   } else if (name === 'freeze') {
     playTone({ frequency: 740, endFrequency: 290, duration: 0.28, gain: 0.026, type: 'sine' });
     playTone({ frequency: 980, endFrequency: 520, duration: 0.2, gain: 0.014, type: 'triangle' });
+  } else if (name === 'cast-freeze') {
+    playTone({ frequency: 420, endFrequency: 980, duration: 0.3, gain: 0.018, type: 'sine' });
+  } else if (name === 'frost-launch') {
+    playTone({ frequency: 960, endFrequency: 620, duration: 0.12, gain: 0.014, type: 'triangle' });
+  } else if (name === 'frost-impact') {
+    playTone({ frequency: 1080, endFrequency: 260, duration: 0.24, gain: 0.022, type: 'sine' });
+    playNoise({ duration: 0.1, gain: 0.018, frequency: 2400 });
+  } else if (name === 'cast-heal') {
+    playTone({ frequency: 260, endFrequency: 640, duration: 0.32, gain: 0.018, type: 'sine' });
+  } else if (name === 'heal-impact') {
+    playTone({ frequency: 520, endFrequency: 860, duration: 0.24, gain: 0.02, type: 'sine' });
+  } else if (name === 'cast-buff') {
+    playTone({ frequency: 220, endFrequency: 740, duration: 0.28, gain: 0.018, type: 'triangle' });
+  } else if (name === 'ward-impact') {
+    playTone({ frequency: 360, endFrequency: 180, duration: 0.24, gain: 0.022, type: 'triangle' });
   } else if (name === 'hurt') {
     playNoise({ duration: 0.13, gain: 0.045, frequency: 520 });
     playTone({ frequency: 120, endFrequency: 70, duration: 0.16, gain: 0.03, type: 'square' });
@@ -496,6 +617,13 @@ function playSfx(name) {
     playNoise({ duration: 0.045, gain: 0.012, frequency: 260 });
   } else if (name === 'chest') {
     playTone({ frequency: 330, endFrequency: 660, duration: 0.22, gain: 0.027, type: 'triangle' });
+  } else if (name === 'warden-phase') {
+    playNoise({ duration: 0.28, gain: 0.035, frequency: 420 });
+    playTone({ frequency: 92, endFrequency: 38, duration: 0.5, gain: 0.032, type: 'sawtooth' });
+    playTone({ frequency: 180, endFrequency: 72, duration: 0.36, gain: 0.022, type: 'triangle' });
+  } else if (name === 'warden-collapse') {
+    playNoise({ duration: 0.12, gain: 0.026, frequency: 680 });
+    playTone({ frequency: 120, endFrequency: 420, duration: 0.34, gain: 0.022, type: 'square' });
   }
 }
 
@@ -504,7 +632,7 @@ function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
 }
 
-function setShadows(object, { cast = true, receive = true } = {}) {
+function setShadows(object, { cast = false, receive = false } = {}) {
   object.traverse((child) => {
     if (!child.isMesh) return;
     child.castShadow = cast;
@@ -550,6 +678,33 @@ function findClip(clips, patterns) {
   });
 }
 
+function cloneAbilityClip(clips, name, sourcePatterns, speed = 1) {
+  const source = findClip(clips, sourcePatterns);
+  if (!source) return null;
+  const clip = source.clone();
+  clip.name = name;
+  if (speed !== 1) {
+    clip.tracks = clip.tracks.map((track) => {
+      const next = track.clone();
+      next.times = Float32Array.from(track.times, (time) => time / speed);
+      return next;
+    });
+    clip.resetDuration();
+  }
+  return clip;
+}
+
+function createAbilityClips(clips) {
+  // ClaudeCraft uses these school-level names. We derive the same small set
+  // from the local CC0 rig so the demo keeps its own asset provenance.
+  return [
+    cloneAbilityClip(clips, 'Cast_Fire', ['spellcast_shoot'], 2.9),
+    cloneAbilityClip(clips, 'Cast_Frost', ['spellcast_raise'], 4.3),
+    cloneAbilityClip(clips, 'Cast_Arcane', ['spellcasting'], 1.85),
+    cloneAbilityClip(clips, 'Cast_Heal', ['spellcast_raise'], 4.8),
+  ].filter(Boolean);
+}
+
 function attachEquipment(visual, assetKey, boneName, { scale = 1, position = [0, 0, 0], rotation = [0, 0, 0] } = {}) {
   const attachmentNames = [boneName, boneName.replace(/[._]/g, '')];
   const attachmentPoint = attachmentNames.map((name) => visual.getObjectByName(name)).find(Boolean);
@@ -593,10 +748,37 @@ function createEnemyNameplate(actor) {
   return { element, healthFill: healthFillElement, cast, castLabel, castFill };
 }
 
+function createTownNameplate(actor) {
+  const element = document.createElement('div');
+  element.className = 'town-nameplate is-hidden';
+  const name = document.createElement('span');
+  name.className = 'town-nameplate-name';
+  name.textContent = actor.name;
+  const role = document.createElement('small');
+  role.className = 'town-nameplate-role';
+  role.textContent = actor.role;
+  element.append(name, role);
+  document.body.append(element);
+  return { element };
+}
+
 class Actor {
-  constructor({ assetKey, type, position, height, name, maxHp = 1, speed = 0, profileKey = 'guard', roomId = null }) {
+  constructor({
+    assetKey,
+    type,
+    position,
+    height,
+    name,
+    role = 'resident',
+    maxHp = 1,
+    speed = 0,
+    profileKey = 'guard',
+    roomId = null,
+    sceneRoot = scene,
+  }) {
     const source = assets.get(assetKey);
     this.name = name;
+    this.role = role;
     this.type = type;
     this.root = new THREE.Group();
     this.root.userData.actor = this;
@@ -609,7 +791,13 @@ class Actor {
     this.backWeapon = null;
     this.weaponSheathed = false;
     if (type === 'player') {
-      this.handWeapon = attachEquipment(this.visual, 'sword', 'handslot.r', { scale: 1.05 });
+      this.handWeapon = attachEquipment(this.visual, 'sword', 'hand.r', {
+        scale: 1.05,
+        // The exported sword origin sits just below the grip. Rotate the
+        // blade forward from the hand and pull that grip back onto the bone.
+        position: [0.16, 0, 0],
+        rotation: [0, 0, Math.PI / 2],
+      });
       this.backWeapon = attachEquipment(this.visual, 'sword', 'chest', {
         scale: 1.05,
         position: [0.06, 0.18, -0.18],
@@ -618,10 +806,11 @@ class Actor {
       this.setWeaponSheathed(true);
     }
     this.root.add(this.visual);
-    scene.add(this.root);
+    sceneRoot.add(this.root);
 
     this.mixer = new THREE.AnimationMixer(this.visual);
-    this.clips = source.animations ?? [];
+    this.clips = [...(source.animations ?? [])];
+    if (type === 'player') this.clips.push(...createAbilityClips(this.clips));
     this.actions = new Map();
     this.currentAction = null;
     this.currentClipName = '';
@@ -634,6 +823,7 @@ class Actor {
     this.animationAccumulator = 0;
     this.frozenTimer = 0;
     this.specialCooldown = profileKey === 'warden' ? 3.5 : 0;
+    this.bossPhase = profileKey === 'warden' ? 1 : 0;
     this.deathTimer = 0;
     this.height = height;
     this.maxHp = maxHp;
@@ -641,11 +831,16 @@ class Actor {
     this.speed = speed;
     this.profileKey = profileKey;
     this.roomId = roomId;
+    this.townPatrol = null;
     this.dead = false;
     this.awake = type === 'player';
     this.evading = false;
     this.lootDropped = false;
-    this.nameplate = type === 'enemy' ? createEnemyNameplate(this) : null;
+    this.nameplate = type === 'enemy'
+      ? createEnemyNameplate(this)
+      : type === 'npc'
+        ? createTownNameplate(this)
+        : null;
     this.play(type === 'player' ? ['idle'] : ['idle_combat', 'idle']);
   }
 
@@ -754,7 +949,7 @@ function createStatic(assetKey, {
   colliderWidth = 0,
   colliderDepth = 0,
   castShadow = false,
-  receiveShadow = true,
+  receiveShadow = false,
   parent = null,
 } = {}) {
   const source = assets.get(assetKey);
@@ -781,6 +976,61 @@ function createStatic(assetKey, {
   return root;
 }
 
+function addTownObject(object) {
+  townWorldGroup.add(object);
+  return object;
+}
+
+function createTownStatic(assetKey, {
+  x = 0,
+  y = 0,
+  z = 0,
+  rotationY = 0,
+  width,
+  depth,
+  height,
+  colliderWidth = 0,
+  colliderDepth = 0,
+} = {}) {
+  const source = assets.get(assetKey);
+  const root = new THREE.Group();
+  const visual = source.scene.clone(true);
+  fitStaticVisual(visual, { width, depth, height });
+  setShadows(visual);
+  root.add(visual);
+  root.position.set(x, y, z);
+  root.rotation.y = rotationY;
+  addTownObject(root);
+  if (colliderWidth > 0 && colliderDepth > 0) {
+    const quarterTurn = Math.abs(Math.sin(rotationY)) > 0.5;
+    townStaticColliders.push({
+      root,
+      minX: x - (quarterTurn ? colliderDepth : colliderWidth) / 2,
+      maxX: x + (quarterTurn ? colliderDepth : colliderWidth) / 2,
+      minZ: z - (quarterTurn ? colliderWidth : colliderDepth) / 2,
+      maxZ: z + (quarterTurn ? colliderWidth : colliderDepth) / 2,
+    });
+  }
+  return root;
+}
+
+function addTownBox({ x, y, z, width, height, depth, material, colliderWidth = 0, colliderDepth = 0 }) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
+  mesh.position.set(x, y, z);
+  mesh.receiveShadow = false;
+  addTownObject(mesh);
+  if (colliderWidth > 0 && colliderDepth > 0) {
+    townStaticColliders.push({
+      root: mesh,
+      minX: x - colliderWidth / 2,
+      maxX: x + colliderWidth / 2,
+      minZ: z - colliderDepth / 2,
+      maxZ: z + colliderDepth / 2,
+    });
+  }
+  return mesh;
+}
+
 function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
   const source = assets.get('archGate');
   const root = new THREE.Group();
@@ -805,7 +1055,7 @@ function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
   visual.position.y -= tempBox.min.y;
   visual.position.z -= center.z;
   visual.updateMatrixWorld(true);
-  setShadows(visual, { cast: false, receive: true });
+  setShadows(visual);
 
   root.add(visual);
   root.position.set(x, 0, z);
@@ -851,7 +1101,7 @@ function createFloorTiles(placements) {
     const tiles = new THREE.InstancedMesh(child.geometry, child.material, placements.length);
     tiles.name = 'instanced-floor-tiles';
     tiles.castShadow = false;
-    tiles.receiveShadow = true;
+    tiles.receiveShadow = false;
     placements.forEach(({ x, z }, index) => {
       translation.makeTranslation(x, 0, z);
       instanceMatrix.multiplyMatrices(translation, child.matrixWorld);
@@ -879,7 +1129,7 @@ function addBox({
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
   mesh.position.set(x, y, z);
   mesh.castShadow = castShadow;
-  mesh.receiveShadow = true;
+  mesh.receiveShadow = false;
   addWorldObject(mesh, parent);
   if (colliderWidth > 0 && colliderDepth > 0) {
     const collider = {
@@ -906,55 +1156,8 @@ function buildLighting() {
   scene.add(new THREE.HemisphereLight(0x8886b3, 0x17131b, 1.7));
   moonLight = new THREE.DirectionalLight(0xc8c9ff, 2.1);
   moonLight.position.set(-5, 12, 7);
-  moonLight.castShadow = !state.lowQualityShadows;
-  moonLight.shadow.mapSize.set(1024, 1024);
-  moonLight.shadow.camera.left = -26;
-  moonLight.shadow.camera.right = 26;
-  moonLight.shadow.camera.top = 24;
-  moonLight.shadow.camera.bottom = -24;
-  moonLight.shadow.camera.near = 0.5;
-  moonLight.shadow.camera.far = 40;
-  moonLight.shadow.bias = -0.0008;
-  moonLight.shadow.normalBias = 0.02;
+  moonLight.castShadow = false;
   scene.add(moonLight, moonLight.target);
-}
-
-function updateQualityReadout() {
-  const preference = state.shadowPreference === 'auto'
-    ? `Auto · ${state.lowQualityShadows ? 'Blob' : 'Full'}`
-    : state.shadowPreference === 'low' ? 'Blob shadows' : 'Full shadows';
-  qualityMode.textContent = `${preference} · ${Math.round(state.resolutionScale * 100)}%`;
-}
-
-function setLowQualityShadows(enabled, { notify = false } = {}) {
-  if (state.lowQualityShadows === enabled) return;
-  state.lowQualityShadows = enabled;
-  if (moonLight) moonLight.castShadow = !enabled;
-  if (blobShadowMesh) blobShadowMesh.visible = enabled;
-  renderer.shadowMap.needsUpdate = true;
-  updateQualityReadout();
-  if (notify && state.loaded) {
-    setToast(enabled
-      ? 'Performance mode enabled: using lightweight blob shadows.'
-      : 'Full directional shadows restored.');
-  }
-}
-
-function cycleShadowPreference() {
-  const preferences = ['auto', 'low', 'high'];
-  const currentIndex = preferences.indexOf(state.shadowPreference);
-  state.shadowPreference = preferences[(currentIndex + 1) % preferences.length];
-  state.autoBlobSlowSamples = 0;
-  state.autoFullRecoverySamples = 0;
-  if (state.shadowPreference === 'low') {
-    setLowQualityShadows(true);
-  } else if (state.shadowPreference === 'high') {
-    setLowQualityShadows(false);
-  } else {
-    setLowQualityShadows(state.resolutionScale <= AUTO_BLOB_SCALE_THRESHOLD);
-  }
-  updateQualityReadout();
-  setToast(`Shadow quality: ${qualityMode.textContent}.`);
 }
 
 function resetFrameSample() {
@@ -968,7 +1171,6 @@ function applyAdaptiveResolutionScale(nextScale) {
   state.resolutionScale = clamped;
   renderer.setPixelRatio(rendererPixelRatio());
   state.resolutionCooldown = RESOLUTION_CHANGE_COOLDOWN;
-  updateQualityReadout();
 }
 
 function updateAdaptiveQuality(frameDelta) {
@@ -997,27 +1199,6 @@ function updateAdaptiveQuality(frameDelta) {
       state.fastFrameSamples = 0;
     }
   }
-
-  if (state.shadowPreference !== 'auto') return;
-  if (!state.lowQualityShadows) {
-    state.autoBlobSlowSamples = state.resolutionScale <= AUTO_BLOB_SCALE_THRESHOLD
-      && averageFrameMs > RESOLUTION_DOWNSHIFT_MS
-      ? state.autoBlobSlowSamples + 1
-      : 0;
-    if (state.autoBlobSlowSamples >= AUTO_BLOB_SLOW_SAMPLES) {
-      state.autoBlobSlowSamples = 0;
-      setLowQualityShadows(true, { notify: true });
-    }
-  } else {
-    state.autoFullRecoverySamples = state.resolutionScale >= 0.9
-      && averageFrameMs < RESOLUTION_UPSHIFT_MS
-      ? state.autoFullRecoverySamples + 1
-      : 0;
-    if (state.autoFullRecoverySamples >= AUTO_FULL_RECOVERY_SAMPLES) {
-      state.autoFullRecoverySamples = 0;
-      setLowQualityShadows(false, { notify: true });
-    }
-  }
 }
 
 function buildBlobShadows() {
@@ -1033,27 +1214,38 @@ function buildBlobShadows() {
   blobShadowMesh = new THREE.InstancedMesh(geometry, material, MAX_BLOB_SHADOWS);
   blobShadowMesh.name = 'blob-shadows';
   blobShadowMesh.count = 0;
-  blobShadowMesh.visible = state.lowQualityShadows;
+  blobShadowMesh.visible = true;
   blobShadowMesh.frustumCulled = false;
   blobShadowMesh.renderOrder = 1;
   blobShadowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   scene.add(blobShadowMesh);
+
+  townBlobShadowMesh = new THREE.InstancedMesh(geometry, material.clone(), 8);
+  townBlobShadowMesh.name = 'town-blob-shadows';
+  townBlobShadowMesh.count = 0;
+  townBlobShadowMesh.visible = true;
+  townBlobShadowMesh.frustumCulled = false;
+  townBlobShadowMesh.renderOrder = 1;
+  townBlobShadowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  townScene.add(townBlobShadowMesh);
 }
 
 function updateBlobShadows() {
-  if (!blobShadowMesh?.visible) return;
+  const shadowMesh = state.mode === 'town' ? townBlobShadowMesh : blobShadowMesh;
+  if (!shadowMesh?.visible) return;
+  const actors = state.mode === 'town' ? [player, ...townNpcs] : [player, ...enemies];
   let count = 0;
-  for (const actor of [player, ...enemies]) {
+  for (const actor of actors) {
     if (!actor || actor.dead || !actor.root.visible || count >= MAX_BLOB_SHADOWS) continue;
     const radius = actor.profileKey === 'warden' ? 1.05 : actor.type === 'player' ? 0.62 : 0.56;
     blobShadowPosition.set(actor.root.position.x, 0.035, actor.root.position.z);
     blobShadowScale.set(radius, radius, 1);
     blobShadowMatrix.compose(blobShadowPosition, blobShadowRotation, blobShadowScale);
-    blobShadowMesh.setMatrixAt(count, blobShadowMatrix);
+    shadowMesh.setMatrixAt(count, blobShadowMatrix);
     count += 1;
   }
-  blobShadowMesh.count = count;
-  blobShadowMesh.instanceMatrix.needsUpdate = true;
+  shadowMesh.count = count;
+  shadowMesh.instanceMatrix.needsUpdate = true;
 }
 
 function addWallSpan({ fixed, start, end, openings = [], horizontal, material }) {
@@ -1165,6 +1357,37 @@ function addTomb(x, z, rotationY = 0, scale = 1) {
   });
 }
 
+function addDecoration(assetKey, x, z, {
+  y = 0,
+  rotationY = 0,
+  width,
+  depth,
+  height,
+  colliderWidth = 0,
+  colliderDepth = 0,
+} = {}) {
+  return createStatic(assetKey, {
+    x,
+    y,
+    z,
+    rotationY,
+    width,
+    depth,
+    height,
+    colliderWidth,
+    colliderDepth,
+  });
+}
+
+function addBrokenFloor(assetKey, x, z, rotationY = 0) {
+  return addDecoration(assetKey, x, z, {
+    y: 0.025,
+    rotationY,
+    width: 1.82,
+    depth: 1.82,
+  });
+}
+
 function addWallTorch(room, wall, along) {
   const inset = 0.58;
   const positions = {
@@ -1189,6 +1412,8 @@ function decorateRoom(room) {
     addColumn(7.5, 31);
     addWallTorch(room, 'west', 27);
     addWallTorch(room, 'east', 27);
+    addDecoration('candleTriple', -8.4, 29.2, { height: 0.48 });
+    addDecoration('candleTriple', 8.4, 24.8, { height: 0.48, rotationY: Math.PI / 2 });
     addRoomLight(room, 0xffbd74, 1.5);
   } else if (room.id === 'hub') {
     for (const [x, z] of [[-10, 5], [10, 5], [-10, 15], [10, 15]]) addColumn(x, z, 3);
@@ -1197,6 +1422,9 @@ function decorateRoom(room) {
     addWallTorch(room, 'north', 9);
     addWallTorch(room, 'south', -9);
     addWallTorch(room, 'south', 9);
+    addDecoration('rubbleHalf', -12.1, 3.4, { width: 1.8 });
+    addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
+    addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
     addRoomLight(room, 0xffa767, 1.75);
     addPointLight(-6.1, 4.25);
     addPointLight(6.1, 4.25, 0xffa767, 2.6);
@@ -1208,6 +1436,11 @@ function decorateRoom(room) {
     }
     addWallTorch(room, 'north', -26);
     addWallTorch(room, 'south', -26);
+    addDecoration('cobweb', -32.8, 3.1, { height: 1.25, rotationY: Math.PI / 2 });
+    addDecoration('cobweb', -19.2, 14.7, { height: 1.05, rotationY: -Math.PI / 2 });
+    addDecoration('boneA', -32, 14.1, { width: 1.15, rotationY: 0.4 });
+    addDecoration('rubbleLarge', -19.8, 3.4, { width: 1.8, rotationY: Math.PI });
+    addBrokenFloor('brokenFloorB', -26, 3.1, 0.25);
     addRoomLight(room, 0xd78b64);
   } else if (room.id === 'westBurial') {
     for (const [x, z, rotation] of [[-53, 6, 0], [-47, 6, 0], [-41, 6, 0], [-53, 13, Math.PI], [-41, 13, Math.PI]]) {
@@ -1215,12 +1448,27 @@ function decorateRoom(room) {
     }
     addWallTorch(room, 'south', -53);
     addWallTorch(room, 'south', -41);
+    addDecoration('coffin', -47, 3.3, {
+      width: 2.2,
+      height: 1,
+      colliderWidth: 2.05,
+      colliderDepth: 0.9,
+    });
+    addDecoration('skullCandle', -54.2, 14.1, { height: 0.62, rotationY: -0.4 });
+    addDecoration('boneB', -39.8, 14.1, { width: 1.1, rotationY: 1.1 });
+    addDecoration('rubbleHalf', -54.2, 3.4, { width: 1.55, rotationY: 0.7 });
     addRoomLight(room, 0xc7765c);
   } else if (room.id === 'westOssuary') {
     for (const [x, z] of [[-53, -13], [-41, -13], [-53, -4], [-41, -4]]) addColumn(x, z, 2.45);
     addTomb(-47, -7, Math.PI / 2, 1.2);
     addWallTorch(room, 'north', -53);
     addWallTorch(room, 'north', -41);
+    addDecoration('boneA', -54.1, -14, { width: 1.15, rotationY: 0.2 });
+    addDecoration('boneB', -50.6, -14.2, { width: 1.05, rotationY: 1.5 });
+    addDecoration('boneC', -43.2, -14.1, { width: 1.2, rotationY: -0.6 });
+    addDecoration('skull', -54.4, -2, { height: 0.55, rotationY: 0.7 });
+    addDecoration('skullCandle', -39.8, -2.2, { height: 0.68 });
+    addDecoration('rubbleLarge', -39.8, -14.1, { width: 1.85, rotationY: Math.PI / 2 });
     addRoomLight(room, 0xb08bff, 1.55);
   } else if (room.id === 'eastGate') {
     for (const [x, z] of [[22, 5], [30, 5], [22, 13], [30, 13]]) addColumn(x, z, 2.3);
@@ -1229,6 +1477,18 @@ function decorateRoom(room) {
     addBox({ x: 26, y: 0.03, z: 13, width: 4.5, height: 0.08, depth: 2.2, material: waterMaterial });
     addWallTorch(room, 'north', 20.5);
     addWallTorch(room, 'south', 31.5);
+    addDecoration('barrelStack', 19.6, 14.2, {
+      width: 1.4,
+      colliderWidth: 1.25,
+      colliderDepth: 1.05,
+    });
+    addDecoration('crateStack', 32.1, 3.5, {
+      width: 1.65,
+      rotationY: Math.PI / 2,
+      colliderWidth: 1.4,
+      colliderDepth: 1.15,
+    });
+    addDecoration('woodSupport', 26, 14.5, { height: 2.15 });
     addRoomLight(room, 0x65b6d1, 1.5);
   } else if (room.id === 'eastFlooded') {
     for (const [x, z, rotation] of [[41, 5, 0], [47, 5, 0], [53, 5, 0], [41, 13, Math.PI], [53, 13, Math.PI]]) {
@@ -1236,6 +1496,16 @@ function decorateRoom(room) {
     }
     addWallTorch(room, 'south', 41);
     addWallTorch(room, 'south', 53);
+    addDecoration('woodSupport', 47, 3.1, { height: 2.1, rotationY: Math.PI / 2 });
+    addDecoration('brokenTable', 54, 14.1, {
+      width: 2.2,
+      rotationY: Math.PI / 2,
+      colliderWidth: 1.9,
+      colliderDepth: 0.8,
+    });
+    addDecoration('boneC', 39.8, 14.1, { width: 1.15, rotationY: -0.8 });
+    addBrokenFloor('brokenFloorA', 47, 5, 0.3);
+    addBrokenFloor('brokenFloorB', 51, 13, -0.4);
     addRoomLight(room, 0x65b6d1, 1.45);
   } else if (room.id === 'eastReliquary') {
     for (const [x, z] of [[41, -13], [53, -13], [41, -4], [53, -4]]) addColumn(x, z, 3.1);
@@ -1243,17 +1513,43 @@ function decorateRoom(room) {
     addTomb(51, -8, Math.PI, 0.9);
     addWallTorch(room, 'north', 41);
     addWallTorch(room, 'north', 53);
+    addDecoration('horseStatue', 47, -2.2, { height: 2.35, rotationY: Math.PI });
+    addDecoration('coins', 44.8, -13.3, { width: 1.2, rotationY: 0.2 });
+    addDecoration('coins', 49.2, -13.5, { width: 1, rotationY: -0.5 });
+    addDecoration('candleTriple', 39.8, -14.1, { height: 0.52 });
+    addDecoration('candleTriple', 54.2, -14.1, { height: 0.52, rotationY: Math.PI });
     addRoomLight(room, 0xe0b75f, 1.65);
   } else if (room.id === 'northHall') {
     for (const [x, z] of [[-9, -7], [9, -7], [-9, -13], [9, -13]]) addColumn(x, z, 2.8);
     addWallTorch(room, 'west', -10);
     addWallTorch(room, 'east', -10);
+    addDecoration('rubbleHalf', -10.4, -14.4, { width: 1.55, rotationY: 0.8 });
+    addDecoration('rubbleLarge', 10.2, -5.5, { width: 1.75, rotationY: -0.5 });
+    addDecoration('cobweb', -10.8, -5.1, { height: 1.1, rotationY: Math.PI / 2 });
+    addBrokenFloor('brokenFloorB', 0, -10, Math.PI / 2);
     addRoomLight(room, 0x8e9aff, 1.4);
   } else if (room.id === 'northLibrary') {
     for (const z of [-21, -25, -29]) {
-      addTomb(-8.5, z, Math.PI / 2, 0.82);
-      addTomb(8.5, z, Math.PI / 2, 0.82);
+      addDecoration('bookcase', -10.4, z, {
+        height: 2.35,
+        rotationY: Math.PI / 2,
+        colliderWidth: 0.75,
+        colliderDepth: 1.65,
+      });
+      addDecoration('bookcase', 10.4, z, {
+        height: 2.35,
+        rotationY: -Math.PI / 2,
+        colliderWidth: 0.75,
+        colliderDepth: 1.65,
+      });
     }
+    addDecoration('brokenTable', 7.7, -30, {
+      width: 2.1,
+      colliderWidth: 1.85,
+      colliderDepth: 0.8,
+    });
+    addDecoration('candleTriple', -7.7, -19.5, { height: 0.5 });
+    addDecoration('cobweb', 10.7, -31, { height: 1.15, rotationY: -Math.PI / 2 });
     addWallTorch(room, 'west', -21);
     addWallTorch(room, 'east', -29);
     addRoomLight(room, 0xa183cf, 1.45);
@@ -1262,6 +1558,17 @@ function decorateRoom(room) {
       addTomb(x, z, rotation, 1.05);
     }
     for (const [x, z] of [[-7, -37], [7, -37], [-7, -47], [7, -47]]) addColumn(x, z, 3.2);
+    addDecoration('coffin', -13.8, -42, {
+      width: 2.2,
+      rotationY: Math.PI / 2,
+      colliderWidth: 0.9,
+      colliderDepth: 2.05,
+    });
+    addDecoration('rubbleLarge', 13.8, -35.8, { width: 1.9, rotationY: -0.6 });
+    addDecoration('skullCandle', -14.1, -35.8, { height: 0.68 });
+    addDecoration('skullCandle', 14.1, -48.2, { height: 0.68, rotationY: Math.PI });
+    addBrokenFloor('brokenFloorA', -3, -42, 0.3);
+    addBrokenFloor('brokenFloorB', 3, -42, -0.4);
     addWallTorch(room, 'north', -12);
     addWallTorch(room, 'north', 12);
     addRoomLight(room, 0xb08bff, 1.8);
@@ -1282,7 +1589,7 @@ function buildCrypt() {
   underfloor.position.y = -0.08;
   underfloor.position.x = (WORLD.minX + WORLD.maxX) / 2;
   underfloor.position.z = (WORLD.minZ + WORLD.maxZ) / 2;
-  underfloor.receiveShadow = true;
+  underfloor.receiveShadow = false;
   scene.add(underfloor);
 
   const grid = new THREE.GridHelper(120, 60, 0x525168, 0x292a3a);
@@ -1330,17 +1637,19 @@ function buildCrypt() {
   return wallMaterial;
 }
 
-function spawnActor({ assetKey, type, name, x, z, height, maxHp, speed, profileKey, roomId }) {
+function spawnActor({ assetKey, type, name, role, x, z, height, maxHp, speed, profileKey, roomId, sceneRoot = scene }) {
   return new Actor({
     assetKey,
     type,
     name,
+    role,
     position: new THREE.Vector3(x, 0, z),
     height,
     maxHp,
     speed,
     profileKey,
     roomId,
+    sceneRoot,
   });
 }
 
@@ -1394,8 +1703,123 @@ function moveGateAssemblyToRoom(gate, roomId) {
   const offsetZ = nextPosition.z - gate.position.z;
   if (Math.abs(offsetX) + Math.abs(offsetZ) < 0.001) return;
   shiftStaticObject(gate.root, offsetX, offsetZ);
-  gate.wallRoots.forEach((root) => shiftStaticObject(root, offsetX, offsetZ));
   gate.position.set(nextPosition.x, 0, nextPosition.z);
+}
+
+function setGateWallFrameVisible(gate, roomId, visible) {
+  gate.wallFrames.get(roomId)?.forEach((root) => {
+    root.visible = visible;
+  });
+}
+
+function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wallMaterial }) {
+  const { x, z } = gateWallPosition(corridor, roomId, travelsAlongZ);
+  const wallThickness = 0.5;
+  const parent = zoneRenderGroups.get(corridor.id);
+  const wallRoots = [];
+
+  if (travelsAlongZ) {
+    const wallSections = [
+      [corridor.minX, x - openingWidth / 2],
+      [x + openingWidth / 2, corridor.maxX],
+    ];
+    for (const [startX, endX] of wallSections) {
+      const sideWidth = endX - startX;
+      wallRoots.push(addBox({
+        x: (startX + endX) / 2,
+        y: 1.35,
+        z,
+        width: sideWidth,
+        height: 2.7,
+        depth: wallThickness,
+        material: wallMaterial,
+        colliderWidth: sideWidth,
+        colliderDepth: wallThickness,
+        parent,
+      }));
+    }
+  } else {
+    const wallSections = [
+      [corridor.minZ, z - openingWidth / 2],
+      [z + openingWidth / 2, corridor.maxZ],
+    ];
+    for (const [startZ, endZ] of wallSections) {
+      const sideWidth = endZ - startZ;
+      wallRoots.push(addBox({
+        x,
+        y: 1.35,
+        z: (startZ + endZ) / 2,
+        width: wallThickness,
+        height: 2.7,
+        depth: sideWidth,
+        material: wallMaterial,
+        colliderWidth: wallThickness,
+        colliderDepth: sideWidth,
+        parent,
+      }));
+    }
+  }
+
+  return wallRoots;
+}
+
+function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth, wallMaterial }) {
+  const corridorX = (corridor.minX + corridor.maxX) / 2;
+  const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
+  const endpointPositions = roomIds.map((roomId) => gateWallPosition(corridor, roomId, travelsAlongZ));
+  const wallThickness = 0.5;
+  const parent = zoneRenderGroups.get(corridor.id);
+  const wallRoots = [];
+
+  if (travelsAlongZ) {
+    const minZ = Math.min(...endpointPositions.map(({ z }) => z));
+    const maxZ = Math.max(...endpointPositions.map(({ z }) => z));
+    const wallDepth = maxZ - minZ + wallThickness;
+    const wallSections = [
+      [corridor.minX, corridorX - openingWidth / 2],
+      [corridorX + openingWidth / 2, corridor.maxX],
+    ];
+    for (const [startX, endX] of wallSections) {
+      const sideWidth = endX - startX;
+      wallRoots.push(addBox({
+        x: (startX + endX) / 2,
+        y: 1.35,
+        z: (minZ + maxZ) / 2,
+        width: sideWidth,
+        height: 2.7,
+        depth: wallDepth,
+        material: wallMaterial,
+        colliderWidth: sideWidth,
+        colliderDepth: wallDepth,
+        parent,
+      }));
+    }
+  } else {
+    const minX = Math.min(...endpointPositions.map(({ x }) => x));
+    const maxX = Math.max(...endpointPositions.map(({ x }) => x));
+    const wallWidth = maxX - minX + wallThickness;
+    const wallSections = [
+      [corridor.minZ, corridorZ - openingWidth / 2],
+      [corridorZ + openingWidth / 2, corridor.maxZ],
+    ];
+    for (const [startZ, endZ] of wallSections) {
+      const sideWidth = endZ - startZ;
+      wallRoots.push(addBox({
+        x: (minX + maxX) / 2,
+        y: 1.35,
+        z: (startZ + endZ) / 2,
+        width: wallWidth,
+        height: 2.7,
+        depth: sideWidth,
+        material: wallMaterial,
+        colliderWidth: wallWidth,
+        colliderDepth: sideWidth,
+        parent,
+      }));
+    }
+  }
+
+  return wallRoots;
 }
 
 function buildGates(wallMaterial) {
@@ -1409,57 +1833,31 @@ function buildGates(wallMaterial) {
     const connectedRoomCenters = roomIds.map((id) => roomCenter(ZONE_BY_ID.get(id)));
     const travelsAlongZ = Math.abs(connectedRoomCenters[1].z - connectedRoomCenters[0].z)
       > Math.abs(connectedRoomCenters[1].x - connectedRoomCenters[0].x);
-    // MAP room order follows progression, so mount the assembly on the wall
-    // of the first connected room until the player opens it.
+    // MAP room order follows progression, so mount the gate on the wall of the
+    // first connected room until the player opens it.
     const { x, z } = gateWallPosition(corridor, roomIds[0], travelsAlongZ);
     const span = travelsAlongZ ? width : depth;
     const openingWidth = Math.min(3.6, span - 1.2);
-    const gateWallOverlap = 0.45;
-    const wallThickness = 0.5;
     const parent = zoneRenderGroups.get(corridor.id);
-    const wallRoots = [];
-
-    if (travelsAlongZ) {
-      const wallSections = [
-        [corridor.minX, x - openingWidth / 2 + gateWallOverlap],
-        [x + openingWidth / 2 - gateWallOverlap, corridor.maxX],
-      ];
-      for (const [startX, endX] of wallSections) {
-        const sideWidth = endX - startX;
-        wallRoots.push(addBox({
-          x: (startX + endX) / 2,
-          y: 1.35,
-          z,
-          width: sideWidth,
-          height: 2.7,
-          depth: wallThickness,
-          material: wallMaterial,
-          colliderWidth: sideWidth,
-          colliderDepth: wallThickness,
-          parent,
-        }));
-      }
-    } else {
-      const wallSections = [
-        [corridor.minZ, z - openingWidth / 2 + gateWallOverlap],
-        [z + openingWidth / 2 - gateWallOverlap, corridor.maxZ],
-      ];
-      for (const [startZ, endZ] of wallSections) {
-        const sideWidth = endZ - startZ;
-        wallRoots.push(addBox({
-          x,
-          y: 1.35,
-          z: (startZ + endZ) / 2,
-          width: wallThickness,
-          height: 2.7,
-          depth: sideWidth,
-          material: wallMaterial,
-          colliderWidth: wallThickness,
-          colliderDepth: sideWidth,
-          parent,
-        }));
-      }
-    }
+    // Bridge the two room wall planes along the corridor so the side walls do
+    // not leave a visible strip of corridor tiles between the sections.
+    buildGateCorridorWalls({
+      corridor,
+      roomIds,
+      travelsAlongZ,
+      openingWidth,
+      wallMaterial,
+    });
+    const wallFrames = new Map(roomIds.map((roomId) => [roomId, buildGateWallFrame({
+      corridor,
+      roomId,
+      travelsAlongZ,
+      openingWidth,
+      wallMaterial,
+    })]));
+    wallFrames.get(roomIds[1]).forEach((root) => {
+      root.visible = false;
+    });
 
     const root = createGateStatic({
       x,
@@ -1476,7 +1874,7 @@ function buildGates(wallMaterial) {
       travelsAlongZ,
       position: new THREE.Vector3(x, 0, z),
       root,
-      wallRoots,
+      wallFrames,
       open: false,
       fromRoomId: null,
       toRoomId: null,
@@ -1485,12 +1883,22 @@ function buildGates(wallMaterial) {
 }
 
 function buildActors() {
-  player = spawnActor({ assetKey: 'knight', type: 'player', name: 'Cryptwalker', x: 0, z: 26.8, height: 1.85, maxHp: 100, speed: 4.2 });
+  player = spawnActor({
+    assetKey: 'knight',
+    type: 'player',
+    name: 'Cryptwalker',
+    x: 0,
+    z: 12.0,
+    height: 1.85,
+    maxHp: 100,
+    speed: 4.2,
+    sceneRoot: townScene,
+  });
   const enemySpawns = [
-    ['Boneguard Captain', -31, 9, 'guard', 'westGate'],
-    ['Burial Hall Reaver', -27, 7, 'rusher', 'westGate'],
+    ['Boneguard Captain', -31, 9, 'guard', 'westGate', 'skeletonMinion'],
+    ['Burial Hall Reaver', -27, 7, 'rusher', 'westGate', 'skeletonRogue'],
     ['Sepulcher Watch', -23, 10, 'guard', 'westGate'],
-    ['Dustbound Ringer', -20, 7, 'pulser', 'westGate'],
+    ['Dustbound Ringer', -20, 7, 'pulser', 'westGate', 'skeletonMage'],
     ['Ashen Sentry', -54, 10, 'guard', 'westBurial'],
     ['Cinderblade', -50, 9, 'rusher', 'westBurial'],
     ['Gallery Keeper', -44, 10, 'support', 'westBurial'],
@@ -1515,24 +1923,24 @@ function buildActors() {
     ['Crossing Guard', 7, -10, 'guard', 'northHall'],
     ['Grave Bolt Acolyte', -5, -6, 'support', 'northHall'],
     ['Catacomb Ringer', 5, -14, 'pulser', 'northHall'],
-    ['Archive Acolyte', -5, -23, 'support', 'northLibrary'],
-    ['Silent Reaver', 5, -23, 'rusher', 'northLibrary'],
+    ['Archive Acolyte', -5, -23, 'support', 'northLibrary', 'skeletonMage'],
+    ['Silent Reaver', 5, -23, 'rusher', 'northLibrary', 'skeletonRogue'],
     ['Index Guard', -4, -28, 'guard', 'northLibrary'],
     ['Dust Scribe', 4, -20, 'pulser', 'northLibrary'],
     ['Warden Vanguard', -5, -41, 'guard', 'wardenKeep'],
     ['Warden Reaver', 5, -41, 'rusher', 'wardenKeep'],
     ['Warden Acolyte', 0, -45, 'support', 'wardenKeep'],
   ];
-  for (const [name, x, z, profileKey, roomId] of enemySpawns) {
+  for (const [name, x, z, profileKey, roomId, assetKey = 'skeletonWarrior'] of enemySpawns) {
     const profileStats = profileKey === 'rusher'
-      ? { maxHp: 26, speed: 1.18 }
+      ? { maxHp: 200, speed: 1.18 }
       : profileKey === 'pulser'
-        ? { maxHp: 34, speed: 0.9 }
+        ? { maxHp: 300, speed: 0.9 }
         : profileKey === 'support'
-          ? { maxHp: 32, speed: 0.92 }
-          : { maxHp: 30, speed: 1.05 };
+          ? { maxHp: 280, speed: 0.92 }
+          : { maxHp: 250, speed: 1.05 };
     enemies.push(spawnActor({
-      assetKey: 'skeletonWarrior',
+      assetKey,
       type: 'enemy',
       name,
       x,
@@ -1550,11 +1958,186 @@ function buildActors() {
     x: 0,
     z: -40,
     height: 2.2,
-    maxHp: 120,
+    maxHp: 2000,
     speed: 0.72,
     profileKey: 'warden',
     roomId: 'wardenKeep',
   }));
+}
+
+function buildTownActors() {
+  const rowan = spawnActor({
+    assetKey: 'ranger',
+    type: 'npc',
+    name: 'Ranger Rowan',
+    role: 'Hunter',
+    x: 0,
+    z: 10.15,
+    height: 1.85,
+    sceneRoot: townScene,
+  });
+  const elin = spawnActor({
+    assetKey: 'knight',
+    type: 'npc',
+    name: 'Guard Elin',
+    role: 'Town guard',
+    x: -7.1,
+    z: 3.8,
+    height: 1.8,
+    sceneRoot: townScene,
+  });
+  const vale = spawnActor({
+    assetKey: 'rogue',
+    type: 'npc',
+    name: 'Tinker Vale',
+    role: 'Artificer',
+    x: 6.6,
+    z: 3.8,
+    height: 1.75,
+    sceneRoot: townScene,
+  });
+  townNpcs.push(rowan, elin, vale);
+  configureTownPatrol(elin, [
+    { x: -6.6, z: 3.8 },
+    { x: -2.2, z: 3.8 },
+    { x: -2.2, z: 5.8 },
+    { x: 0, z: 5.8 },
+    { x: 0, z: 12.8 },
+    { x: 2.2, z: 12.8 },
+    { x: 2.2, z: 5.8 },
+    { x: 2.2, z: 3.8 },
+    { x: 6.6, z: 3.8 },
+    { x: 2.2, z: 3.8 },
+    { x: 2.2, z: 5.8 },
+    { x: 0, z: 5.8 },
+    { x: -2.2, z: 5.8 },
+    { x: -2.2, z: 3.8 },
+  ], { speed: 1.25, pause: 0.45 });
+  configureTownPatrol(vale, [
+    { x: 2.8, z: 3.8 },
+    { x: 6.6, z: 3.8 },
+  ], { speed: 0.9, pause: 0.8 });
+  configureTownPatrol(rowan, [
+    { x: 0, z: 13.1 },
+    { x: 0, z: 10.2 },
+    { x: 3.7, z: 10.2 },
+    { x: 0, z: 10.2 },
+  ], { speed: 1.1, pause: 0.7 });
+  townNpcs.forEach((npc) => {
+    npc.awake = true;
+    npc.play(['idle', 'idle_combat'], { force: true });
+  });
+}
+
+function configureTownPatrol(actor, waypoints, { speed = 1.1, pause = 0.6 } = {}) {
+  actor.townPatrol = {
+    waypoints: waypoints.map(({ x, z }) => new THREE.Vector3(x, 0, z)),
+    targetIndex: 0,
+    speed,
+    pause,
+    pauseTimer: 0,
+  };
+}
+
+function updateTownNpcPatrol(npc, delta) {
+  const patrol = npc.townPatrol;
+  if (!patrol || patrol.waypoints.length < 2) return false;
+
+  const target = patrol.waypoints[patrol.targetIndex];
+  if (patrol.pauseTimer > 0) {
+    patrol.pauseTimer = Math.max(0, patrol.pauseTimer - delta);
+    tempVector.subVectors(target, npc.root.position);
+    tempVector.y = 0;
+    npc.faceDirection(tempVector);
+    npc.play(['idle_combat', 'idle']);
+    return true;
+  }
+
+  tempVector.subVectors(target, npc.root.position);
+  tempVector.y = 0;
+  const distance = tempVector.length();
+  if (distance <= 0.14) {
+    npc.root.position.set(target.x, 0, target.z);
+    patrol.targetIndex = (patrol.targetIndex + 1) % patrol.waypoints.length;
+    patrol.pauseTimer = patrol.pause;
+    tempVector.subVectors(patrol.waypoints[patrol.targetIndex], npc.root.position);
+    tempVector.y = 0;
+    npc.faceDirection(tempVector);
+    npc.play(['idle_combat', 'idle']);
+    return true;
+  }
+
+  tempVector.multiplyScalar(1 / distance);
+  const previousX = npc.root.position.x;
+  const previousZ = npc.root.position.z;
+  const step = Math.min(distance, patrol.speed * delta);
+  moveActorWithinMap(npc, tempVector.x * step, tempVector.z * step, 0.55);
+  if (Math.abs(npc.root.position.x - previousX) + Math.abs(npc.root.position.z - previousZ) < 0.0001) {
+    patrol.targetIndex = (patrol.targetIndex + 1) % patrol.waypoints.length;
+    patrol.pauseTimer = patrol.pause;
+    npc.play(['idle_combat', 'idle']);
+    return true;
+  }
+  npc.faceDirection(tempVector);
+  npc.play(['running', 'walking', 'idle_combat']);
+  return true;
+}
+
+function buildTownLighting() {
+  townScene.add(new THREE.HemisphereLight(0xd8ebd6, 0x304536, 2.4));
+  const sun = new THREE.DirectionalLight(0xffe2b0, 2.8);
+  sun.position.set(-12, 18, 10);
+  sun.target.position.set(0, 0, 0);
+  townScene.add(sun, sun.target);
+  const lantern = new THREE.PointLight(0xffc66f, 3.2, 12, 2);
+  lantern.position.set(0, 3, 10.8);
+  townScene.add(lantern);
+}
+
+function buildTown() {
+  townWorldGroup = new THREE.Group();
+  townWorldGroup.name = 'scene:town-ravenrest';
+  townScene.add(townWorldGroup);
+
+  const grassMaterial = new THREE.MeshStandardMaterial({ color: 0x587d5a, roughness: 0.94, metalness: 0.02 });
+  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x9d8664, roughness: 0.98, metalness: 0 });
+  const roadEdgeMaterial = new THREE.MeshStandardMaterial({ color: 0x6f795d, roughness: 0.98, metalness: 0 });
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(TOWN_WORLD.maxX - TOWN_WORLD.minX, TOWN_WORLD.maxZ - TOWN_WORLD.minZ),
+    grassMaterial,
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(0, -0.08, 0.5);
+  addTownObject(ground);
+  addTownBox({ x: 0, y: -0.015, z: 3.8, width: 4.2, height: 0.08, depth: 23, material: roadMaterial });
+  addTownBox({ x: 0, y: -0.012, z: 3.8, width: 30, height: 0.06, depth: 3.1, material: roadMaterial });
+  addTownBox({ x: 0, y: 0.01, z: 3.8, width: 1.15, height: 0.08, depth: 23, material: roadEdgeMaterial });
+
+  createTownStatic('townHomeA', { x: -10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8 });
+  createTownStatic('townHomeB', { x: 10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8 });
+  createTownStatic('townTavern', { x: 0, z: -8.5, height: 4.8, colliderWidth: 6.3, colliderDepth: 5.4 });
+  createTownStatic('townMarket', { x: -10.1, z: 8, height: 3.8, rotationY: Math.PI, colliderWidth: 5.1, colliderDepth: 3.4 });
+  createTownStatic('townBlacksmith', { x: 10.1, z: 3.8, height: 3.8, colliderWidth: 5.1, colliderDepth: 3.4 });
+  createTownStatic('townWell', { x: 0, z: 3.4, height: 2.9, colliderWidth: 2.8, colliderDepth: 2.8 });
+  createTownStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 5, rotationY: Math.PI / 2 });
+  createTownStatic('townTarget', { x: 8.1, z: 10.2, height: 1.7, rotationY: Math.PI / 2 });
+  createTownStatic('archGate', { x: 0, z: 14.2, width: 4.8, height: 4.4 });
+  createTownStatic('townMarketStandA', { x: -12.2, z: 0.8, height: 2.1, rotationY: Math.PI / 2 });
+  createTownStatic('townMarketStandB', { x: -9.4, z: 0.8, height: 1.9, rotationY: Math.PI / 2 });
+  createTownStatic('townCart', { x: -6.7, z: -0.8, height: 2.9, rotationY: 0, colliderWidth: 1.8, colliderDepth: 3.4 });
+  createTownStatic('townBarrel', { x: 7.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
+  createTownStatic('townBarrel', { x: 8.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
+  createTownStatic('townBench', { x: -4.5, z: 8.1, height: 0.8, rotationY: Math.PI / 2 });
+
+  for (const x of [-15, -11, 11, 15]) {
+    createTownStatic('townFence', { x, z: -13.3, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
+  }
+  for (const x of [-15, -11, 11, 15]) {
+    createTownStatic('townFence', { x, z: 15.2, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
+  }
+
+  buildTownActors();
+  buildTownLighting();
 }
 
 function buildWorld() {
@@ -1563,6 +2146,7 @@ function buildWorld() {
   buildChests();
   buildGates(wallMaterial);
   buildActors();
+  buildTown();
   buildBlobShadows();
   updateHealthUi();
   updateQuestUi();
@@ -1629,6 +2213,82 @@ function updateZoneVisibility(roomId, force = false) {
   });
 }
 
+function showDialogue(npcName, copy, duration = 2400) {
+  dialogueName.textContent = npcName;
+  dialogueCopy.textContent = copy;
+  dialogueCard.classList.remove('is-hidden');
+  window.clearTimeout(dialogueTimeout);
+  dialogueTimeout = window.setTimeout(() => dialogueCard.classList.add('is-hidden'), duration);
+}
+
+function updateModeUi() {
+  const inTown = state.mode === 'town';
+  areaName.textContent = inTown ? 'Ravenrest Village' : ZONE_BY_ID.get(state.currentRoomId)?.label ?? 'Entrance Vault';
+  minimapLabel.textContent = inTown ? 'VILLAGE MAP' : 'CRYPT MAP';
+  minimap.closest('.minimap-card')?.classList.remove('is-hidden');
+  targetCard.classList.toggle('is-hidden', inTown);
+  abilityStrip.classList.toggle('is-hidden', inTown);
+  backpackCard.classList.toggle('is-hidden', inTown);
+  if (inTown) clearSelectedTarget({ silent: true });
+  else updateTargetUi();
+}
+
+function nearestTownNpc(maxDistance = Infinity) {
+  let nearest = null;
+  let nearestDistance = maxDistance;
+  for (const npc of townNpcs) {
+    const distance = player.root.position.distanceTo(npc.root.position);
+    if (distance < nearestDistance) {
+      nearest = npc;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function enterDungeon() {
+  if (state.mode === 'dungeon' || !player) return;
+  state.mode = 'dungeon';
+  state.teleporting = false;
+  for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
+  window.clearTimeout(dialogueTimeout);
+  dialogueCard.classList.add('is-hidden');
+  state.started = false;
+  state.combatStarted = false;
+  player.root.removeFromParent();
+  scene.add(player.root);
+  player.root.position.set(0, 0, 26.8);
+  player.root.rotation.y = 0;
+  player.setWeaponSheathed(true);
+  state.currentRoomId = 'entrance';
+  state.currentZoneId = null;
+  state.discoveredRooms = new Set(['entrance']);
+  visibleZoneIds.clear();
+  updateZoneVisibility('entrance', true);
+  camera.position.set(player.root.position.x + 10.6, 11.5, player.root.position.z + 12.2);
+  controls.target.set(player.root.position.x, 0.8, player.root.position.z);
+  controls.update();
+  updateModeUi();
+  updateMinimap(0, true);
+  showDialogue('Ranger Rowan', 'The cryptwalker has arrived. Keep the old dead from reaching Ravenrest.', 3000);
+  setToast('Ranger Rowan sent you into the Forgotten Crypt.', 2600);
+}
+
+function talkToTownNpc(npc) {
+  if (!npc || state.teleporting) return;
+  npc.face(player.root.position);
+  if (npc.role === 'Hunter') {
+    state.teleporting = true;
+    showDialogue(npc.name, 'The old bell has started ringing below the hill. Follow my mark into the crypt.', 1500);
+    setToast('The hunter opens a trail beneath Ravenrest…', 1500);
+    window.setTimeout(enterDungeon, 900);
+    return;
+  }
+  showDialogue(npc.name, npc.role === 'Town guard'
+    ? 'The southern road is quiet. Rowan knows the safe path into the crypt.'
+    : 'Fresh tools, fresh trouble. Rowan is the one to ask about the dungeon.', 2600);
+}
+
 function livingEnemiesInBranch(branch, { includeWarden = true } = {}) {
   return enemies.filter((enemy) => (
     !enemy.dead
@@ -1666,6 +2326,11 @@ function updateProgression() {
   if (traversedGate) {
     traversedGate.open = false;
     traversedGate.root.visible = true;
+    // Keep both doorway frames in place. The room wall has a four-tile
+    // corridor opening; the frame sections narrow it back to the two-tile gate
+    // opening even while the gate itself is open on the other side.
+    setGateWallFrameVisible(traversedGate, previousRoomId, true);
+    setGateWallFrameVisible(traversedGate, room.id, true);
     traversedGate.fromRoomId = null;
     traversedGate.toRoomId = null;
   }
@@ -1685,6 +2350,20 @@ function runObjectivesComplete() {
 }
 
 function isWalkable(x, z, padding = 0.55) {
+  if (state.mode === 'town') {
+    const insideTown = x >= TOWN_WORLD.minX + padding
+      && x <= TOWN_WORLD.maxX - padding
+      && z >= TOWN_WORLD.minZ + padding
+      && z <= TOWN_WORLD.maxZ - padding;
+    if (!insideTown) return false;
+    return !townStaticColliders.some((collider) => (
+      collider.root.visible
+      && x >= collider.minX - padding
+      && x <= collider.maxX + padding
+      && z >= collider.minZ - padding
+      && z <= collider.maxZ + padding
+    ));
+  }
   const insideMap = MAP.zones.some((zone) => {
     // Corridors overlap the room interiors by the actor clearance so their
     // usable areas meet at each doorway instead of leaving a collision seam.
@@ -1707,8 +2386,9 @@ function isWalkable(x, z, padding = 0.55) {
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
   const currentX = actor.root.position.x;
   const currentZ = actor.root.position.z;
-  const nextX = THREE.MathUtils.clamp(currentX + offsetX, WORLD.minX + padding, WORLD.maxX - padding);
-  const nextZ = THREE.MathUtils.clamp(currentZ + offsetZ, WORLD.minZ + padding, WORLD.maxZ - padding);
+  const bounds = state.mode === 'town' ? TOWN_WORLD : WORLD;
+  const nextX = THREE.MathUtils.clamp(currentX + offsetX, bounds.minX + padding, bounds.maxX - padding);
+  const nextZ = THREE.MathUtils.clamp(currentZ + offsetZ, bounds.minZ + padding, bounds.maxZ - padding);
   if (isWalkable(nextX, currentZ, padding)) actor.root.position.x = nextX;
   if (isWalkable(actor.root.position.x, nextZ, padding)) actor.root.position.z = nextZ;
 }
@@ -1738,49 +2418,60 @@ function pickActor(clientX, clientY) {
   return null;
 }
 
-function closeActionMenu() {
-  actionTarget = null;
-  actionMenu.classList.add('is-hidden');
+function ensureTargetMarker() {
+  if (targetMarker) return;
+  targetMarker = new THREE.Mesh(
+    new THREE.TorusGeometry(0.82, 0.035, 8, 40),
+    new THREE.MeshBasicMaterial({
+      color: 0xd8b5f0,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  targetMarker.name = 'selected-target-marker';
+  targetMarker.rotation.x = Math.PI / 2;
+  targetMarker.visible = false;
+  scene.add(targetMarker);
 }
 
-function updateActionMenuPosition() {
-  if (!actionTarget || state.finished || state.failed || actionTarget.dead) {
-    if (actionTarget) closeActionMenu();
-    return;
-  }
-  projectedAnchor.copy(actionTarget.root.position);
-  projectedAnchor.y += actionTarget.height + 0.35;
-  projectedAnchor.project(camera);
-  if (projectedAnchor.z < -1 || projectedAnchor.z > 1) {
-    closeActionMenu();
-    return;
-  }
-  const menuHalfWidth = actionTarget === player ? 82 : 126;
-  const x = THREE.MathUtils.clamp(
-    (projectedAnchor.x * 0.5 + 0.5) * window.innerWidth,
-    menuHalfWidth,
-    window.innerWidth - menuHalfWidth,
-  );
-  const y = THREE.MathUtils.clamp(
-    (-projectedAnchor.y * 0.5 + 0.5) * window.innerHeight,
-    82,
-    window.innerHeight - 96,
-  );
-  actionMenu.style.left = `${x}px`;
-  actionMenu.style.top = `${y}px`;
+function clearSelectedTarget({ silent = false } = {}) {
+  selectedTarget = null;
+  if (targetMarker) targetMarker.visible = false;
+  if (!silent && state.started) setToast('Target cleared.', 900);
+  updateTargetUi();
+  updateActionUi();
 }
 
-function openActionMenu(target) {
-  if (!state.loaded || state.finished || state.failed || !target || target.dead) return;
+function selectTarget(target) {
+  if (!state.loaded || state.finished || state.failed) return;
+  if (!target || target.dead || (target !== player && !isEnemyAccessible(target))) {
+    clearSelectedTarget({ silent: true });
+    return;
+  }
   state.started = true;
-  actionTarget = target;
-  const isSelf = target === player;
-  actionMenuTitle.textContent = isSelf ? 'SELF ACTIONS' : `${target.name.toUpperCase()} ACTIONS`;
-  actionBubbles.forEach((button) => {
-    button.classList.toggle('is-hidden', button.dataset.scope !== (isSelf ? 'self' : 'enemy'));
-  });
-  actionMenu.classList.remove('is-hidden');
-  updateActionMenuPosition();
+  selectedTarget = target;
+  ensureTargetMarker();
+  targetMarker.visible = target !== player;
+  updateTargetUi();
+  updateActionUi();
+}
+
+function updateTargetMarker(delta = 0) {
+  if (!targetMarker || !selectedTarget || selectedTarget === player || selectedTarget.dead || !isEnemyAccessible(selectedTarget)) {
+    if (targetMarker) targetMarker.visible = false;
+    if (selectedTarget && (selectedTarget.dead || !isEnemyAccessible(selectedTarget))) {
+      clearSelectedTarget({ silent: true });
+    }
+    return;
+  }
+  targetMarker.visible = true;
+  targetMarker.position.copy(selectedTarget.root.position);
+  targetMarker.position.y = 0.055;
+  targetMarker.scale.setScalar(0.86 + Math.sin(state.elapsed * 5.2) * 0.045);
+  targetMarker.rotation.z += delta * 1.8;
+  targetMarker.material.opacity = 0.58 + Math.sin(state.elapsed * 6.5) * 0.1;
 }
 
 function updateHealthUi() {
@@ -1800,8 +2491,12 @@ function updateTargetUi() {
     targetCard.classList.add('is-hidden');
     return;
   }
-  const selectedEnemy = actionTarget && actionTarget !== player && !actionTarget.dead ? actionTarget : null;
-  const target = selectedEnemy ?? nearestLivingEnemy(4.4);
+  const target = selectedTarget
+    && selectedTarget !== player
+    && !selectedTarget.dead
+    && isEnemyAccessible(selectedTarget)
+    ? selectedTarget
+    : null;
   if (!target) {
     targetCard.classList.add('is-hidden');
     return;
@@ -1810,6 +2505,9 @@ function updateTargetUi() {
   targetName.textContent = target.name;
   targetFill.style.width = `${Math.max(0, target.hp / target.maxHp) * 100}%`;
   const statuses = [];
+  if (target.profileKey === 'warden' && target.bossPhase >= 2) {
+    statuses.push('<span class="status-chip is-danger">PHASE II</span>');
+  }
   if (target.frozenTimer > 0) statuses.push(`<span class="status-chip is-frozen">FROZEN ${target.frozenTimer.toFixed(1)}s</span>`);
   if (target.pendingEnemyAttack?.label) statuses.push(`<span class="status-chip is-danger">${target.pendingEnemyAttack.label}</span>`);
   if (target.evading) statuses.push('<span class="status-chip">RESETTING</span>');
@@ -1817,25 +2515,36 @@ function updateTargetUi() {
 }
 
 function updateActionUi() {
-  for (const button of actionBubbles) {
-    const action = button.dataset.action;
+  for (const slot of abilitySlots) {
+    const action = slot.dataset.ability;
     const remaining = state.actionCooldowns[action] ?? 0;
     const total = actionCooldownFor(action);
-    const ratio = total > 0 ? remaining / total : 0;
-    let readout = button.querySelector('.action-cooldown');
-    if (!readout) {
-      readout = document.createElement('span');
-      readout.className = 'action-cooldown';
-      button.append(readout);
-    }
-    readout.textContent = remaining > 0 ? remaining.toFixed(1) : '';
-    button.disabled = remaining > 0;
-    button.style.setProperty('--cooldown-angle', `${ratio * 360}deg`);
-  }
-  for (const slot of abilitySlots) {
-    const remaining = state.actionCooldowns[slot.dataset.ability] ?? 0;
+    const target = selectedTarget
+      && selectedTarget !== player
+      && !selectedTarget.dead
+      && isEnemyAccessible(selectedTarget)
+      ? selectedTarget
+      : null;
+    const needsTarget = action !== 'heal' && action !== 'buff';
+    const outOfRange = target && needsTarget
+      ? player.root.position.distanceTo(target.root.position) > ACTIONS[action].range
+      : false;
+    const blocked = (needsTarget && (!target || outOfRange))
+      || (action === 'heal' && state.playerHp >= state.playerMaxHp);
     slot.classList.toggle('is-cooling', remaining > 0);
+    slot.classList.toggle('is-unusable', blocked);
+    slot.classList.toggle('is-casting', player?.pendingAction === action);
     slot.querySelector('strong').textContent = remaining > 0 ? `${remaining.toFixed(1)}s` : 'READY';
+    const targetHint = needsTarget
+      ? !target
+        ? ' Select an enemy target first.'
+        : outOfRange
+          ? ' Target is out of range.'
+          : ''
+      : action === 'heal' && state.playerHp >= state.playerMaxHp
+        ? ' Vitality is already full.'
+        : '';
+    slot.setAttribute('aria-label', `${ACTION_NAMES[action]}. Press ${slot.dataset.key}.${targetHint}`);
   }
 }
 
@@ -1921,7 +2630,7 @@ function createLootVisual(itemId, position) {
     roughness: 0.35,
     metalness: item.kind === 'equipment' ? 0.65 : 0.18,
   }));
-  core.castShadow = true;
+  core.castShadow = false;
   root.add(core);
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(0.34, 0.025, 8, 28),
@@ -2043,6 +2752,8 @@ function openGate(gate) {
   for (const otherGate of state.gates) {
     if (!otherGate.open) continue;
     moveGateAssemblyToRoom(otherGate, otherGate.fromRoomId);
+    setGateWallFrameVisible(otherGate, otherGate.fromRoomId, true);
+    setGateWallFrameVisible(otherGate, otherGate.toRoomId, false);
     otherGate.open = false;
     otherGate.root.visible = true;
     otherGate.fromRoomId = null;
@@ -2051,6 +2762,8 @@ function openGate(gate) {
   gate.open = true;
   gate.fromRoomId = state.currentRoomId;
   gate.toRoomId = gate.roomIds.find((id) => id !== state.currentRoomId) ?? null;
+  setGateWallFrameVisible(gate, gate.fromRoomId, true);
+  setGateWallFrameVisible(gate, gate.toRoomId, true);
   moveGateAssemblyToRoom(gate, gate.toRoomId);
   gate.root.visible = false;
   updateZoneVisibility(state.currentRoomId, true);
@@ -2079,6 +2792,12 @@ function chestBlockReason(chest) {
 }
 
 function updateQuestUi() {
+  if (state.mode === 'town') {
+    threatValue.textContent = 'SAFE';
+    objective.textContent = 'Find the hunter';
+    objectiveDetail.textContent = 'Speak with Ranger Rowan at the archery yard to enter the Forgotten Crypt.';
+    return;
+  }
   const threats = countLivingEnemies();
   threatValue.textContent = `${threats} ${threats === 1 ? 'REMAINS' : 'REMAIN'}`;
   if (state.finished) {
@@ -2103,7 +2822,7 @@ function updateQuestUi() {
     objectiveDetail.textContent = 'Open the cache in the Silent Archive to continue into the Warden\'s Keep.';
   } else if (livingEnemiesInRoom('wardenKeep').length > 0) {
     objective.textContent = 'Defeat the Crypt Warden';
-    objectiveDetail.textContent = 'Dodge its telegraphed slam and break the dead it calls back.';
+    objectiveDetail.textContent = 'Dodge its slam and Soul Collapse while breaking the dead it calls back.';
   } else if (!chestById('warden-spoils')?.opened) {
     objective.textContent = 'Claim the Warden\'s spoils';
     objectiveDetail.textContent = 'The final reliquary is no longer warded.';
@@ -2116,6 +2835,19 @@ function updateQuestUi() {
 function updateInteractionUi() {
   if (!state.loaded || state.finished || state.failed) {
     interaction.classList.add('is-hidden');
+    return;
+  }
+  if (state.mode === 'town') {
+    const nearbyNpc = nearestTownNpc(2.45);
+    if (state.teleporting) {
+      interaction.classList.remove('is-hidden');
+      interaction.textContent = 'The hunter is opening the crypt path…';
+    } else if (nearbyNpc) {
+      interaction.classList.remove('is-hidden');
+      interaction.innerHTML = `Press <kbd>E</kbd> to speak with ${nearbyNpc.name}`;
+    } else {
+      interaction.classList.add('is-hidden');
+    }
     return;
   }
   const nearbyLoot = nearestLootDrop(1.9);
@@ -2166,6 +2898,289 @@ function spawnBurst(position, color = 0xf0c071, count = 12) {
       velocity: new THREE.Vector3(Math.cos(angle) * (0.65 + Math.random() * 0.35), 1.2 + Math.random() * 0.7, Math.sin(angle) * (0.65 + Math.random() * 0.35)),
     });
   }
+}
+
+function spellMaterial(color, opacity = 0.8) {
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  material.userData.baseOpacity = opacity;
+  return material;
+}
+
+function createSpellRing(color, radius = 0.55, thickness = 0.035) {
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(radius, thickness, 8, 36),
+    spellMaterial(color, 0.8),
+  );
+  ring.rotation.x = Math.PI / 2;
+  return ring;
+}
+
+function setVisualOpacity(root, opacity) {
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (material?.transparent) material.opacity = (material.userData.baseOpacity ?? 1) * opacity;
+    }
+  });
+}
+
+function disposeVisual(root) {
+  if (!root) return;
+  root.parent?.remove(root);
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    child.geometry?.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => material?.dispose());
+  });
+}
+
+function spellCastLabel(action) {
+  return action === 'fire'
+    ? 'CAST FIRE'
+    : action === 'freeze'
+      ? 'CAST FROST'
+      : action === 'heal'
+        ? 'CAST HEAL'
+        : 'RAISE WARD';
+}
+
+function spawnSpellCharge(action) {
+  const color = SPELL_COLORS[action];
+  const root = new THREE.Group();
+  root.name = `spell-charge-${action}`;
+  root.position.set(0, 1.14, 0.48);
+  const ring = createSpellRing(color, action === 'heal' ? 0.5 : 0.42, 0.035);
+  root.add(ring);
+  const orb = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(action === 'heal' ? 0.13 : 0.16, 1),
+    spellMaterial(color, 0.9),
+  );
+  orb.position.y = 0.08;
+  root.add(orb);
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(action === 'heal' ? 0.25 : 0.3, 12, 8),
+    spellMaterial(color, 0.14),
+  );
+  halo.position.y = 0.08;
+  root.add(halo);
+  if (action === 'freeze') {
+    const frostRing = createSpellRing(0xdaf5ff, 0.28, 0.022);
+    frostRing.rotation.y = Math.PI / 2;
+    root.add(frostRing);
+  }
+  if (action === 'heal') {
+    const liftRing = createSpellRing(0xc6f5d5, 0.28, 0.022);
+    liftRing.position.y = 0.32;
+    root.add(liftRing);
+  }
+  player.root.add(root);
+  spellVisuals.push({
+    kind: 'charge',
+    action,
+    root,
+    life: SPELL_CAST_TIMES[action],
+    maxLife: SPELL_CAST_TIMES[action],
+  });
+  playSfx(`cast-${action}`);
+  if (action !== 'buff') {
+    spawnCombatText(player.root.position, spellCastLabel(action), `#${new THREE.Color(color).getHexString()}`, player.height + 0.18);
+  }
+}
+
+function createSpellProjectile(action) {
+  const color = SPELL_COLORS[action];
+  const root = new THREE.Group();
+  root.name = `spell-projectile-${action}`;
+  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(action === 'fire' ? 0.16 : 0.14, 1), spellMaterial(color, 0.95));
+  root.add(core);
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(action === 'fire' ? 0.32 : 0.27, 12, 8), spellMaterial(color, 0.16));
+  root.add(halo);
+  const ring = createSpellRing(action === 'fire' ? 0xffd27a : 0xdaf5ff, action === 'fire' ? 0.24 : 0.2, 0.025);
+  ring.rotation.y = Math.PI / 2;
+  root.add(ring);
+  for (let index = 0; index < 3; index += 1) {
+    const tail = new THREE.Mesh(
+      new THREE.SphereGeometry(action === 'fire' ? 0.07 : 0.055, 8, 6),
+      spellMaterial(color, 0.32 - index * 0.07),
+    );
+    tail.position.z = 0.18 + index * 0.14;
+    tail.scale.setScalar(1 - index * 0.18);
+    root.add(tail);
+  }
+  return root;
+}
+
+function spellTargetPosition(target) {
+  return spellTarget.copy(target.root.position).setY(target.root.position.y + target.height * 0.56).clone();
+}
+
+function spawnSpellProjectile(action, target) {
+  if (!target || target.dead) return;
+  spellOrigin.set(0, 1.14, 0.66);
+  player.root.localToWorld(spellOrigin);
+  const destination = spellTargetPosition(target);
+  const distance = spellOrigin.distanceTo(destination);
+  const speed = action === 'fire' ? 18 : 15;
+  const root = createSpellProjectile(action);
+  root.position.copy(spellOrigin);
+  scene.add(root);
+  spellProjectiles.push({
+    action,
+    root,
+    target,
+    start: spellOrigin.clone(),
+    destination,
+    duration: THREE.MathUtils.clamp(distance / speed, 0.22, 0.58),
+    life: 0,
+  });
+  playSfx(action === 'fire' ? 'fire-launch' : 'frost-launch');
+}
+
+function spawnSpellImpact(action, position) {
+  const color = SPELL_COLORS[action];
+  const root = new THREE.Group();
+  root.name = `spell-impact-${action}`;
+  root.position.copy(position);
+  root.position.y += 0.045;
+  const ring = createSpellRing(color, action === 'freeze' ? 0.42 : 0.34, 0.045);
+  root.add(ring);
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(action === 'freeze' ? 0.22 : 0.25, 12, 8),
+    spellMaterial(color, 0.32),
+  );
+  flash.position.y = 0.58;
+  root.add(flash);
+  if (action === 'freeze') {
+    for (let index = 0; index < 6; index += 1) {
+      const shard = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.36, 5), spellMaterial(0xdaf5ff, 0.78));
+      const angle = (index / 6) * Math.PI * 2;
+      shard.position.set(Math.cos(angle) * 0.35, 0.22, Math.sin(angle) * 0.35);
+      shard.rotation.z = Math.cos(angle) * 0.7;
+      shard.rotation.x = Math.sin(angle) * 0.7;
+      root.add(shard);
+    }
+  }
+  scene.add(root);
+  spellVisuals.push({ kind: 'impact', action, root, life: 0.46, maxLife: 0.46 });
+  spawnBurst(position, color, action === 'freeze' ? 18 : 16);
+  playSfx(action === 'fire' ? 'fire-impact' : action === 'freeze' ? 'frost-impact' : action === 'buff' ? 'ward-impact' : 'heal-impact');
+  addCameraFeedback(action === 'freeze' ? 0.1 : 0.075, action === 'freeze' ? 1.1 : 0.8);
+}
+
+function clearWardVisual() {
+  if (!wardVisual) return;
+  disposeVisual(wardVisual.root);
+  wardVisual = null;
+}
+
+function activateWardVisual() {
+  clearWardVisual();
+  const root = new THREE.Group();
+  root.name = 'ward-shell';
+  root.position.y = 1.02;
+  const shell = new THREE.Mesh(
+    new THREE.SphereGeometry(0.9, 20, 14),
+    new THREE.MeshBasicMaterial({
+      color: SPELL_COLORS.buff,
+      transparent: true,
+      opacity: 0.12,
+      wireframe: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  shell.material.userData.baseOpacity = 0.12;
+  root.add(shell);
+  root.add(createSpellRing(SPELL_COLORS.buff, 0.86, 0.035));
+  const orbit = new THREE.Group();
+  root.add(orbit);
+  for (let index = 0; index < 6; index += 1) {
+    const plate = new THREE.Mesh(new THREE.OctahedronGeometry(0.13, 0), spellMaterial(0xe7d8ff, 0.52));
+    const angle = (index / 6) * Math.PI * 2;
+    plate.position.set(Math.cos(angle) * 0.82, Math.sin(angle * 2) * 0.13, Math.sin(angle) * 0.82);
+    plate.scale.set(1, 1.7, 0.34);
+    orbit.add(plate);
+  }
+  player.root.add(root);
+  wardVisual = { root, orbit, phase: 0 };
+  spawnSpellImpact('buff', player.root.position);
+}
+
+function updateSpellProjectiles(delta) {
+  for (let index = spellProjectiles.length - 1; index >= 0; index -= 1) {
+    const projectile = spellProjectiles[index];
+    projectile.life += delta;
+    const progress = THREE.MathUtils.clamp(projectile.life / projectile.duration, 0, 1);
+    const destination = projectile.target && !projectile.target.dead
+      ? spellTargetPosition(projectile.target)
+      : projectile.destination;
+    projectile.root.position.lerpVectors(projectile.start, destination, progress);
+    projectile.root.lookAt(destination);
+    const pulse = 0.9 + Math.sin(projectile.life * 28) * 0.1;
+    projectile.root.scale.setScalar(pulse);
+    if (progress >= 1) {
+      disposeVisual(projectile.root);
+      spellProjectiles.splice(index, 1);
+      const target = projectile.target;
+      const impactPosition = target && !target.dead ? target.root.position.clone() : destination.clone();
+      spawnSpellImpact(projectile.action, impactPosition);
+      if (target && !target.dead) {
+        if (projectile.action === 'freeze') {
+          const damage = playerDamage(target.profileKey === 'warden' ? 7 : 10, 'freeze');
+          target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
+          target.attackPending = false;
+          target.pendingEnemyAttack = null;
+          applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
+          spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
+        } else {
+          const damage = playerDamage(target.profileKey === 'warden' ? 24 : 34, 'fire');
+          applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
+        }
+      }
+    }
+  }
+}
+
+function updateSpellVisuals(delta) {
+  for (let index = spellVisuals.length - 1; index >= 0; index -= 1) {
+    const visual = spellVisuals[index];
+    visual.life -= delta;
+    const progress = THREE.MathUtils.clamp(1 - visual.life / visual.maxLife, 0, 1);
+    if (visual.kind === 'charge') {
+      visual.root.rotation.y += delta * 2.8;
+      visual.root.scale.setScalar(0.86 + Math.sin(progress * Math.PI) * 0.18);
+      setVisualOpacity(visual.root, Math.min(1, 0.25 + (1 - progress) * 0.75));
+    } else {
+      visual.root.rotation.y += delta * 1.6;
+      visual.root.scale.setScalar(0.55 + progress * 1.8);
+      setVisualOpacity(visual.root, Math.max(0, 1 - progress));
+    }
+    if (visual.life <= 0) {
+      disposeVisual(visual.root);
+      spellVisuals.splice(index, 1);
+    }
+  }
+}
+
+function updateWardVisual(delta) {
+  if (!wardVisual) return;
+  if (state.playerBuffTimer <= 0 || state.finished || state.failed) {
+    clearWardVisual();
+    return;
+  }
+  wardVisual.phase += delta;
+  wardVisual.orbit.rotation.y = wardVisual.phase * 0.8;
+  const pulse = 1 + Math.sin(wardVisual.phase * 5) * 0.035;
+  wardVisual.root.scale.setScalar(pulse);
+  setVisualOpacity(wardVisual.root, 0.92 + Math.min(0.18, state.playerBuffTimer / 40));
 }
 
 function spawnCombatText(position, text, color = '#f3d093', height = 1.55) {
@@ -2221,6 +3236,7 @@ function updateEnemyNameplates() {
     nameplate.element.classList.toggle('is-hidden', !visible);
     if (!visible) continue;
     nameplate.element.classList.toggle('is-alerted', enemy.awake && state.combatStarted && !enemy.evading);
+    nameplate.element.classList.toggle('is-selected', selectedTarget === enemy);
     nameplate.element.style.left = `${x}px`;
     nameplate.element.style.top = `${y}px`;
     nameplate.healthFill.style.width = `${Math.max(0, enemy.hp / enemy.maxHp) * 100}%`;
@@ -2235,6 +3251,31 @@ function updateEnemyNameplates() {
     nameplate.cast.classList.remove('is-hidden');
     nameplate.castLabel.textContent = attack.label;
     nameplate.castFill.style.width = `${progress * 100}%`;
+  }
+}
+
+function updateTownNpcNameplates() {
+  for (const npc of townNpcs) {
+    const nameplate = npc.nameplate;
+    if (!nameplate) continue;
+    const distance = player.root.position.distanceTo(npc.root.position);
+    if (state.mode !== 'town' || !npc.root.visible || distance > 15) {
+      nameplate.element.classList.add('is-hidden');
+      continue;
+    }
+    projectedAnchor.copy(npc.root.position);
+    projectedAnchor.y += npc.height + 0.42;
+    projectedAnchor.project(camera);
+    const x = (projectedAnchor.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-projectedAnchor.y * 0.5 + 0.5) * window.innerHeight;
+    const visible = projectedAnchor.z >= -1 && projectedAnchor.z <= 1
+      && x > -70 && x < window.innerWidth + 70
+      && y > 20 && y < window.innerHeight + 40;
+    nameplate.element.classList.toggle('is-hidden', !visible);
+    if (!visible) continue;
+    nameplate.element.classList.toggle('is-hunter', npc.role === 'Hunter');
+    nameplate.element.style.left = `${x}px`;
+    nameplate.element.style.top = `${y}px`;
   }
 }
 
@@ -2317,6 +3358,10 @@ function applyPlayerAction() {
   const target = player.attackTarget;
   player.pendingAction = null;
   player.attackTarget = null;
+  if (action === 'heal' || action === 'buff') {
+    applySelfAction(action);
+    return;
+  }
   if (!target || target.dead) return;
 
   const distance = player.root.position.distanceTo(target.root.position);
@@ -2325,94 +3370,93 @@ function applyPlayerAction() {
     playSfx('sword');
     applyEnemyDamage(target, damage, 0xe9b36f, `${target.name} takes ${damage} damage.`);
   } else if (action === 'fire' && distance <= 8.5) {
-    const damage = playerDamage(target.profileKey === 'warden' ? 12 : 17, action);
-    playSfx('fire');
-    applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
+    spawnSpellProjectile('fire', target);
   } else if (action === 'freeze' && distance <= 8.5) {
-    const damage = playerDamage(target.profileKey === 'warden' ? 7 : 10, action);
-    playSfx('freeze');
-    target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
-    target.attackPending = false;
-    target.pendingEnemyAttack = null;
-    applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
-    spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
+    spawnSpellProjectile('freeze', target);
   }
 }
 
 function applySelfAction(action) {
   if (action === 'heal') {
-    const restored = state.playerMaxHp - state.playerHp;
-    state.playerHp = state.playerMaxHp;
+    const restored = Math.min(
+      Math.round(state.playerMaxHp * HEAL_FRACTION),
+      state.playerMaxHp - state.playerHp,
+    );
+    state.playerHp += restored;
     updateHealthUi();
-    spawnBurst(player.root.position, 0x8ed9a8, 18);
+    spawnSpellImpact('heal', player.root.position);
     spawnCombatText(player.root.position, `+${restored}`, '#9fe1bb', player.height + 0.2);
-    setToast(restored > 0 ? 'Vitality restored to full.' : 'Vitality is already full.');
+    setToast(restored > 0 ? `Vitality restored by ${restored}.` : 'Vitality is already full.');
   } else if (action === 'buff') {
     state.playerBuffTimer = 8;
-    spawnBurst(player.root.position, 0xd0a2f0, 18);
+    activateWardVisual();
     spawnCombatText(player.root.position, 'WARD', '#d8b5f0', player.height + 0.2);
     setToast('Arcane buff active: enemy damage is negated for 8s.');
   }
 }
 
-function useAction(action, target) {
+function useAction(action, target = selectedTarget) {
   if (!state.loaded || state.finished || state.failed) return;
   const actionDef = ACTIONS[action];
   if (!actionDef) return;
   const selfAction = action === 'heal' || action === 'buff';
-  if (!selfAction && (!target || target === player || target.dead || !isEnemyAccessible(target))) return;
+  if (!selfAction && (!target || target === player || target.dead || !isEnemyAccessible(target))) {
+    if (target?.dead || (target && target !== player && !isEnemyAccessible(target))) {
+      clearSelectedTarget({ silent: true });
+    }
+    setToast('Select a living enemy target first.', 1100);
+    return;
+  }
   const remaining = state.actionCooldowns[action] ?? 0;
   if (remaining > 0) {
-    setToast(`${action === 'buff' ? 'Ward' : action[0].toUpperCase() + action.slice(1)} is ready in ${remaining.toFixed(1)}s.`, 1000);
-    closeActionMenu();
+    setToast(`${ACTION_NAMES[action]} is ready in ${remaining.toFixed(1)}s.`, 1000);
     return;
   }
   if (player.attackLock > 0 || player.attackCooldown > 0) {
     setToast('The cryptwalker is still recovering.', 1000);
-    closeActionMenu();
     return;
   }
   if (action === 'heal' && state.playerHp >= state.playerMaxHp) {
     setToast('Vitality is already full.', 1000);
-    closeActionMenu();
     return;
   }
   if (!selfAction) {
     const range = actionDef.range;
     if (player.root.position.distanceTo(target.root.position) > range) {
       setToast(`${target.name} is out of range.`, 1100);
-      closeActionMenu();
       return;
     }
     state.combatStarted = true;
     state.weaponReadyTimer = 4.5;
     player.setWeaponSheathed(false);
     player.attackLock = action === 'sword' ? 0.67 : 0.58;
-    player.attackTimer = action === 'sword' ? 0.24 : 0.2;
+    player.attackTimer = action === 'sword' ? 0.24 : SPELL_CAST_TIMES[action];
     player.attackTarget = target;
     player.pendingAction = action;
     player.face(target.root.position);
-    player.play(['1h_melee_attack', 'melee_attack', 'attack'], { once: true, force: true });
+    player.play(action === 'sword'
+      ? ['1h_melee_attack', 'melee_attack', 'attack']
+      : [action === 'fire' ? 'Cast_Fire' : 'Cast_Frost'], { once: true, force: true });
+    if (action !== 'sword') spawnSpellCharge(action);
     player.attackCooldown = action === 'sword' ? 0.52 : 0.78;
   } else {
-    player.attackLock = 0.45;
+    player.attackLock = action === 'heal' ? 0.62 : 0.56;
     player.attackCooldown = 0.65;
-    player.attackTimer = 0;
+    player.attackTimer = SPELL_CAST_TIMES[action];
     player.attackTarget = null;
-    player.pendingAction = null;
-    player.play(['idle'], { force: true });
-    applySelfAction(action);
+    player.pendingAction = action;
+    player.play([action === 'heal' ? 'Cast_Heal' : 'Cast_Arcane'], { once: true, force: true });
+    spawnSpellCharge(action);
   }
   state.actionCooldowns[action] = actionCooldownFor(action);
   state.started = true;
-  closeActionMenu();
 }
 
 function attemptAttack() {
-  const target = nearestLivingEnemy(3.1);
+  const target = selectedTarget && selectedTarget !== player && !selectedTarget.dead ? selectedTarget : null;
   if (!target) {
     state.started = true;
-    setToast('Nothing close enough to strike.');
+    setToast('Select an enemy target first.');
     return;
   }
   useAction('sword', target);
@@ -2446,16 +3490,24 @@ function updatePlayer(delta) {
     if (player.attackTimer <= 0) applyPlayerAction();
   }
   if (player.attackLock <= 0) {
-    tempVector.set(
-      (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0),
-      0,
-      (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0),
-    );
-    if (tempVector.lengthSq() > 0) {
-      tempVector.normalize();
+    const forwardInput = (keys.has('w') || keys.has('arrowup') ? 1 : 0)
+      - (keys.has('s') || keys.has('arrowdown') ? 1 : 0);
+    const strafeInput = (keys.has('d') || keys.has('arrowright') ? 1 : 0)
+      - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
+    movementDirection.set(0, 0, 0);
+    if (forwardInput !== 0 || strafeInput !== 0) {
+      camera.getWorldDirection(cameraForward);
+      cameraForward.y = 0;
+      if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
+      else cameraForward.normalize();
+      cameraRight.crossVectors(cameraForward, worldUp).normalize();
+      movementDirection
+        .addScaledVector(cameraForward, forwardInput)
+        .addScaledVector(cameraRight, strafeInput)
+        .normalize();
       const speed = player.speed * (state.playerBuffTimer > 0 ? 1.25 : 1);
-      moveActorWithinMap(player, tempVector.x * speed * delta, tempVector.z * speed * delta, 0.65);
-      player.faceDirection(tempVector);
+      moveActorWithinMap(player, movementDirection.x * speed * delta, movementDirection.z * speed * delta, 0.65);
+      player.faceDirection(movementDirection);
       player.play(['running', 'walking']);
       if (state.footstepTimer <= 0) {
         playSfx('step');
@@ -2527,15 +3579,26 @@ function startMeleeAttack(enemy, profile) {
   enemy.play(['1h_melee_attack', 'melee_attack', 'attack'], { once: true, force: true });
 }
 
-function startGroundAttack(enemy, profile, { wardenSlam = false } = {}) {
-  const position = wardenSlam ? enemy.root.position.clone() : player.root.position.clone();
-  const radius = wardenSlam ? 3.9 : profile.radius;
-  const damage = wardenSlam ? 10 : profile.damage;
-  const label = wardenSlam ? 'WARDEN SLAM' : profile.kind === 'support' ? 'GRAVE BOLT' : 'DEATH PULSE';
-  const castDuration = wardenSlam ? 1.2 : profile.windup;
+function startGroundAttack(enemy, profile, { wardenSlam = false, phaseTwo = false } = {}) {
+  const soulCollapse = wardenSlam && phaseTwo;
+  const position = soulCollapse
+    ? player.root.position.clone()
+    : wardenSlam
+      ? enemy.root.position.clone()
+      : player.root.position.clone();
+  const radius = soulCollapse ? 2.35 : wardenSlam ? 3.9 : profile.radius;
+  const damage = soulCollapse ? 12 : wardenSlam ? 10 : profile.damage;
+  const label = soulCollapse
+    ? 'SOUL COLLAPSE'
+    : wardenSlam
+      ? 'WARDEN SLAM'
+      : profile.kind === 'support'
+        ? 'GRAVE BOLT'
+        : 'DEATH PULSE';
+  const castDuration = soulCollapse ? 1.05 : wardenSlam ? 1.2 : profile.windup;
   const attack = { kind: 'ground', label, position, radius, damage, castDuration, castRemaining: castDuration };
   enemy.pendingEnemyAttack = attack;
-  enemy.attackLock = profile.windup + 0.3;
+  enemy.attackLock = castDuration + 0.3;
   enemy.attackCooldown = profile.attackCooldown;
   enemy.face(player.root.position);
   enemy.play(['1h_melee_attack', 'melee_attack', 'attack'], { once: true, force: true });
@@ -2543,14 +3606,15 @@ function startGroundAttack(enemy, profile, { wardenSlam = false } = {}) {
     position,
     radius,
     duration: castDuration,
-    color: wardenSlam ? 0xc44743 : profile.kind === 'support' ? 0x9a69cf : 0xd57a62,
+    color: soulCollapse ? 0x9a5ec1 : wardenSlam ? 0xc44743 : profile.kind === 'support' ? 0x9a69cf : 0xd57a62,
     attack,
     onResolve: () => {
       if (enemy.dead || enemy.frozenTimer > 0 || enemy.pendingEnemyAttack !== attack) return;
       enemy.pendingEnemyAttack = null;
-      spawnBurst(position, wardenSlam ? 0xe06252 : 0xb07bd3, wardenSlam ? 28 : 16);
+      spawnBurst(position, soulCollapse ? 0xb978da : wardenSlam ? 0xe06252 : 0xb07bd3, soulCollapse ? 22 : wardenSlam ? 28 : 16);
       if (player.root.position.distanceTo(position) <= radius) damagePlayer(damage, enemy.name);
       else spawnCombatText(player.root.position, 'DODGED', '#a9d8ef', player.height + 0.2);
+      if (soulCollapse) playSfx('warden-collapse');
     },
   });
 }
@@ -2576,6 +3640,35 @@ function healWeakestAlly(enemy, profile) {
   return true;
 }
 
+function startWardenPhaseTwo(enemy) {
+  if (enemy.bossPhase >= 2 || enemy.dead) return;
+  enemy.bossPhase = 2;
+  enemy.speed *= 1.18;
+  enemy.specialCooldown = 1.5;
+  enemy.attackCooldown = Math.min(enemy.attackCooldown, 0.65);
+
+  const phaseVisual = new THREE.Group();
+  phaseVisual.name = 'warden-phase-two-mark';
+  phaseVisual.position.y = 0.05;
+  phaseVisual.add(createSpellRing(0xde7290, 1.28, 0.05));
+  const innerRing = createSpellRing(0x9a5ec1, 0.86, 0.028);
+  innerRing.rotation.z = Math.PI / 2;
+  phaseVisual.add(innerRing);
+  enemy.root.add(phaseVisual);
+
+  scene.background.set('#110a15');
+  scene.fog.color.set('#140a18');
+  if (moonLight) {
+    moonLight.color.set(0xe5a1bb);
+    moonLight.intensity = 1.75;
+  }
+  spawnBurst(enemy.root.position, 0xc45f83, 30);
+  spawnCombatText(enemy.root.position, 'PHASE II', '#ef9ab2', enemy.height + 0.6);
+  addCameraFeedback(0.25, 1.8);
+  playSfx('warden-phase');
+  setToast('The Crypt Warden tears open the dark. Keep moving.', 2800);
+}
+
 function spawnWardenAdds() {
   if (state.wardenSummoned) return;
   state.wardenSummoned = true;
@@ -2587,7 +3680,7 @@ function spawnWardenAdds() {
       x,
       z: -43,
       height: 1.75,
-      maxHp: 22,
+      maxHp: 200,
       speed: 1.2,
       profileKey: 'rusher',
       roomId: 'wardenKeep',
@@ -2654,9 +3747,12 @@ function updateEnemy(enemy, delta) {
 
   if (enemy.profileKey === 'warden') {
     if (enemy.hp <= enemy.maxHp * 0.55) spawnWardenAdds();
-    if (enemy.specialCooldown <= 0 && distance <= 5.5) {
-      enemy.specialCooldown = profile.slamCooldown;
-      startGroundAttack(enemy, profile, { wardenSlam: true });
+    if (enemy.hp <= enemy.maxHp * 0.5) startWardenPhaseTwo(enemy);
+    const phaseTwo = enemy.bossPhase >= 2;
+    const specialRange = phaseTwo ? 8.5 : 5.5;
+    if (enemy.specialCooldown <= 0 && distance <= specialRange) {
+      enemy.specialCooldown = phaseTwo ? 5.2 : profile.slamCooldown;
+      startGroundAttack(enemy, profile, { wardenSlam: true, phaseTwo });
       return;
     }
   }
@@ -2700,6 +3796,14 @@ function minimapPoint(x, z) {
   };
 }
 
+function townMinimapPoint(x, z) {
+  const pad = 10;
+  return {
+    x: pad + ((x - TOWN_WORLD.minX) / (TOWN_WORLD.maxX - TOWN_WORLD.minX)) * (minimap.width - pad * 2),
+    y: pad + ((z - TOWN_WORLD.minZ) / (TOWN_WORLD.maxZ - TOWN_WORLD.minZ)) * (minimap.height - pad * 2),
+  };
+}
+
 function drawMinimapZone(zone, fill, stroke, lineWidth = 1) {
   const first = minimapPoint(zone.minX, zone.minZ);
   const second = minimapPoint(zone.maxX, zone.maxZ);
@@ -2717,6 +3821,33 @@ function updateMinimap(delta, force = false) {
   minimapContext.clearRect(0, 0, minimap.width, minimap.height);
   minimapContext.fillStyle = '#070912';
   minimapContext.fillRect(0, 0, minimap.width, minimap.height);
+
+  if (state.mode === 'town') {
+    const first = townMinimapPoint(TOWN_WORLD.minX, TOWN_WORLD.minZ);
+    const second = townMinimapPoint(TOWN_WORLD.maxX, TOWN_WORLD.maxZ);
+    minimapContext.fillStyle = 'rgba(63, 99, 70, 0.95)';
+    minimapContext.fillRect(first.x, first.y, second.x - first.x, second.y - first.y);
+    minimapContext.fillStyle = 'rgba(155, 130, 96, 0.9)';
+    const roadStart = townMinimapPoint(-2.1, TOWN_WORLD.minZ);
+    const roadEnd = townMinimapPoint(2.1, TOWN_WORLD.maxZ);
+    minimapContext.fillRect(roadStart.x, roadStart.y, roadEnd.x - roadStart.x, roadEnd.y - roadStart.y);
+    const crossStart = townMinimapPoint(TOWN_WORLD.minX, 2.25);
+    const crossEnd = townMinimapPoint(TOWN_WORLD.maxX, 5.35);
+    minimapContext.fillRect(crossStart.x, crossStart.y, crossEnd.x - crossStart.x, crossEnd.y - crossStart.y);
+    for (const npc of townNpcs) {
+      const point = townMinimapPoint(npc.root.position.x, npc.root.position.z);
+      minimapContext.fillStyle = npc.role === 'Hunter' ? '#e7c16f' : '#b8a0e8';
+      minimapContext.beginPath();
+      minimapContext.arc(point.x, point.y, npc.role === 'Hunter' ? 3.4 : 2.6, 0, Math.PI * 2);
+      minimapContext.fill();
+    }
+    const playerPoint = townMinimapPoint(player.root.position.x, player.root.position.z);
+    minimapContext.fillStyle = '#fff5df';
+    minimapContext.beginPath();
+    minimapContext.arc(playerPoint.x, playerPoint.y, 3.6, 0, Math.PI * 2);
+    minimapContext.fill();
+    return;
+  }
 
   for (const corridor of MAP.corridors) {
     drawMinimapZone(corridor, 'rgba(48, 47, 65, 0.8)', 'rgba(111, 103, 132, 0.36)');
@@ -2791,7 +3922,7 @@ function updateCamera(delta) {
     camera.fov = nextFov;
     camera.updateProjectionMatrix();
   }
-  if (moonLight) {
+  if (moonLight && state.mode === 'dungeon') {
     moonLight.position.set(player.root.position.x - 5, 12, player.root.position.z + 7);
     moonLight.target.position.set(player.root.position.x, 0, player.root.position.z);
   }
@@ -2846,7 +3977,10 @@ function openChest(chest) {
 
 function interact() {
   if (!state.loaded || state.finished || state.failed) return;
-  closeActionMenu();
+  if (state.mode === 'town') {
+    talkToTownNpc(nearestTownNpc(2.45));
+    return;
+  }
   state.started = true;
   const nearbyLoot = nearestLootDrop(1.9);
   if (nearbyLoot) {
@@ -2866,6 +4000,7 @@ function finishRun(success) {
   if (state.finished || state.failed) return;
   state.finished = success;
   state.failed = !success;
+  clearWardVisual();
   if (success) {
     endEyebrow.textContent = 'CRYPT CLEARED';
     endTitle.textContent = 'The path is clear.';
@@ -2879,7 +4014,7 @@ function finishRun(success) {
   targetCard.classList.add('is-hidden');
   interaction.classList.add('is-hidden');
   for (const enemy of enemies) enemy.nameplate?.element.classList.add('is-hidden');
-  closeActionMenu();
+  clearSelectedTarget({ silent: true });
   updateQuestUi();
 }
 
@@ -2901,18 +4036,24 @@ async function loadAssets() {
 
 function onKeyDown(event) {
   initAudio();
+  const activeTag = document.activeElement?.tagName?.toLowerCase();
+  if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
+  const action = ACTION_BY_KEY.get(event.code);
+  if (action && !event.repeat) {
+    useAction(action);
+    event.preventDefault();
+    return;
+  }
   const key = event.key.toLowerCase();
   if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
     state.started = true;
-    closeActionMenu();
+    state.combatStarted = true;
     keys.add(key);
     event.preventDefault();
   }
   if (key === 'e' && !event.repeat) interact();
-  if (key === 'q' && !event.repeat) cycleShadowPreference();
-  if (key === 'escape') closeActionMenu();
+  if (key === 'escape' && !event.repeat) clearSelectedTarget();
   if (event.code === 'Space' && !event.repeat) {
-    closeActionMenu();
     attemptAttack();
     event.preventDefault();
   }
@@ -2920,6 +4061,16 @@ function onKeyDown(event) {
 
 function onKeyUp(event) {
   keys.delete(event.key.toLowerCase());
+}
+
+function updateTownActors(delta) {
+  for (const npc of townNpcs) {
+    npc.update(delta);
+    if (!updateTownNpcPatrol(npc, delta)) {
+      npc.face(player.root.position);
+      npc.play(['idle', 'idle_combat']);
+    }
+  }
 }
 
 function animate() {
@@ -2936,42 +4087,50 @@ function animate() {
     player.update(delta);
     updatePlayer(delta);
     updateWeaponState(delta);
-    updateProgression();
-    if (runObjectivesComplete() && player.root.position.distanceTo(state.exitPosition) < 2.4) {
-      finishRun(true);
-    }
-    for (const enemy of enemies) {
-      if (enemy.dead && !enemy.root.visible) continue;
-      const distanceSq = player.root.position.distanceToSquared(enemy.root.position);
-      const roomVisible = visibleZoneIds.has(enemy.roomId);
-      const shouldRender = roomVisible && distanceSq <= ENEMY_RENDER_DISTANCE_SQ;
-      if (!enemy.dead && enemy.root.visible !== shouldRender) {
-        enemy.root.visible = shouldRender;
+    if (state.mode === 'dungeon') {
+      updateProgression();
+      if (runObjectivesComplete() && player.root.position.distanceTo(state.exitPosition) < 2.4) {
+        finishRun(true);
       }
-      const animationInterval = !roomVisible
-        ? null
-        : distanceSq > FULL_ANIMATION_DISTANCE_SQ ? DISTANT_ANIMATION_INTERVAL : 0;
-      enemy.update(delta, animationInterval);
-      if (!roomVisible) continue;
-      if (!enemy.awake && !enemy.evading && distanceSq > ENEMY_SIMULATION_DISTANCE_SQ) continue;
-      updateEnemy(enemy, delta);
+      for (const enemy of enemies) {
+        if (enemy.dead && !enemy.root.visible) continue;
+        const distanceSq = player.root.position.distanceToSquared(enemy.root.position);
+        const roomVisible = visibleZoneIds.has(enemy.roomId);
+        const shouldRender = roomVisible && distanceSq <= ENEMY_RENDER_DISTANCE_SQ;
+        if (!enemy.dead && enemy.root.visible !== shouldRender) {
+          enemy.root.visible = shouldRender;
+        }
+        const animationInterval = !roomVisible
+          ? null
+          : distanceSq > FULL_ANIMATION_DISTANCE_SQ ? DISTANT_ANIMATION_INTERVAL : 0;
+        enemy.update(delta, animationInterval);
+        if (!roomVisible) continue;
+        if (!enemy.awake && !enemy.evading && distanceSq > ENEMY_SIMULATION_DISTANCE_SQ) continue;
+        updateEnemy(enemy, delta);
+      }
+      updateEffects(delta);
+      updateSpellProjectiles(delta);
+      updateSpellVisuals(delta);
+      updateWardVisual(delta);
+      updateLootDrops(delta);
+      updateTelegraphs(delta);
+      updateCombatTexts(delta);
+    } else {
+      updateTownActors(delta);
     }
     updateBlobShadows();
-    updateEffects(delta);
-    updateLootDrops(delta);
-    updateTelegraphs(delta);
-    updateCombatTexts(delta);
     updateCamera(delta);
     state.overlayTimer -= delta;
     if (state.overlayTimer <= 0) {
       state.overlayTimer = 1 / 30;
-      updateEnemyNameplates();
+      if (state.mode === 'dungeon') updateEnemyNameplates();
+      else updateTownNpcNameplates();
     }
     updateMinimap(delta);
     updateInterface(delta);
-    updateActionMenuPosition();
+    updateTargetMarker(delta);
   }
-  renderer.render(scene, camera);
+  renderer.render(state.mode === 'town' ? townScene : dungeonScene, camera);
 }
 
 window.addEventListener('resize', () => {
@@ -2985,7 +4144,6 @@ window.addEventListener('keyup', onKeyUp);
 canvas.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
   initAudio();
-  closeActionMenu();
   pointerPress = { x: event.clientX, y: event.clientY, time: performance.now() };
 });
 canvas.addEventListener('pointerup', (event) => {
@@ -2995,14 +4153,15 @@ canvas.addEventListener('pointerup', (event) => {
   pointerPress = null;
   if (distance < 8 && duration < 500) {
     const target = pickActor(event.clientX, event.clientY);
-    if (target) openActionMenu(target);
+    if (target) selectTarget(target);
+    else clearSelectedTarget();
   }
 });
 canvas.addEventListener('pointercancel', () => {
   pointerPress = null;
 });
-actionBubbles.forEach((button) => {
-  button.addEventListener('click', () => useAction(button.dataset.action, actionTarget));
+abilitySlots.forEach((button) => {
+  button.addEventListener('click', () => useAction(button.dataset.ability));
 });
 backpackSlots.forEach((button) => {
   button.addEventListener('click', () => useInventorySlot(Number(button.dataset.inventorySlot)));
@@ -3015,15 +4174,15 @@ async function start() {
     buildWorld();
     setLoading(0.98, 'Settling the shadows');
     await renderer.compileAsync(scene, camera);
+    await renderer.compileAsync(townScene, camera);
     state.loaded = true;
-    updateProgression();
-    updateQualityReadout();
+    updateModeUi();
     updateInterface(0, true);
     updateInventoryUi();
     updateMinimap(0, true);
-    setLoading(1, 'The crypt is awake');
+    setLoading(1, 'Ravenrest is awake');
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
-    setToast('Three branches wait beyond the central hub.');
+    setToast('Find Ranger Rowan by the archery yard.');
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
