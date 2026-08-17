@@ -105,7 +105,6 @@ const ITEM_DEFS = {
   healingDraft: {
     name: 'Gravebloom Draft',
     kind: 'consumable',
-    rarity: 'common',
     glyph: '✚',
     color: '#91cfa7',
     description: 'Restore 30 vitality.',
@@ -113,7 +112,6 @@ const ITEM_DEFS = {
   ossuaryEdge: {
     name: 'Ossuary Edge',
     kind: 'equipment',
-    rarity: 'uncommon',
     glyph: '⚔',
     color: '#8fc8bd',
     description: 'Sword damage +20%.',
@@ -122,7 +120,6 @@ const ITEM_DEFS = {
   emberCharm: {
     name: 'Ember Charm',
     kind: 'equipment',
-    rarity: 'rare',
     glyph: '✹',
     color: '#d68b65',
     description: 'Fire damage +25%.',
@@ -131,7 +128,6 @@ const ITEM_DEFS = {
   frostRune: {
     name: 'Rimebound Rune',
     kind: 'equipment',
-    rarity: 'rare',
     glyph: '❄',
     color: '#87c8e8',
     description: 'Frostbolt cooldown -25%.',
@@ -140,7 +136,6 @@ const ITEM_DEFS = {
   wardenRelic: {
     name: 'Warden Relic',
     kind: 'equipment',
-    rarity: 'epic',
     glyph: '◆',
     color: '#c49ae6',
     description: 'All damage +12%.',
@@ -212,15 +207,12 @@ const ASSETS = {
   townWell: '/assets/models/biome/hex_well.glb',
   townArcheryRange: '/assets/models/biome/hexr_archeryrange.glb',
   townTarget: '/assets/models/biome/hex_target.glb',
-  townGrassTile: '/assets/models/biome/hex_tile_grass.glb',
-  townRoadTile: '/assets/models/biome/hex_tile_road.glb',
   townBarrel: '/assets/models/biome/kcas_barrel.glb',
   townBench: '/assets/models/biome/kcas_bench.glb',
   townCart: '/assets/models/props/cart.glb',
   townFence: '/assets/models/props/fence.glb',
   townMarketStandA: '/assets/models/props/market_stand_1.glb',
   townMarketStandB: '/assets/models/props/market_stand_2.glb',
-  townVillageWell: '/assets/models/props/well.glb',
 };
 
 const WORLD = {
@@ -403,12 +395,9 @@ const state = {
   cameraFovKick: 0,
   cameraOffset: new THREE.Vector3(),
   exitPosition: new THREE.Vector3(0, 32.4, 0),
-  toastTimer: 0,
-  toastText: '',
   elapsed: 0,
   uiTimer: 0,
   overlayTimer: 0,
-  dialogueTimer: 0,
   weaponUiSheathed: null,
   resolutionScale: 1,
   frameSampleSeconds: 0,
@@ -520,8 +509,6 @@ function setLoading(progress, label) {
 }
 
 function setToast(message, duration = 2200) {
-  state.toastText = message;
-  state.toastTimer = duration / 1000;
   toast.textContent = message;
   toast.classList.add('is-visible');
   window.clearTimeout(toastTimeout);
@@ -632,14 +619,6 @@ function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
 }
 
-function setShadows(object, { cast = false, receive = false } = {}) {
-  object.traverse((child) => {
-    if (!child.isMesh) return;
-    child.castShadow = cast;
-    child.receiveShadow = receive;
-  });
-}
-
 function alignVisualToGround(visual, desiredHeight) {
   visual.updateMatrixWorld(true);
   tempBox.setFromObject(visual);
@@ -719,7 +698,6 @@ function attachEquipment(visual, assetKey, boneName, { scale = 1, position = [0,
     if (Array.isArray(child.material)) child.material = child.material.map((material) => material.clone());
     else if (child.material) child.material = child.material.clone();
   });
-  setShadows(equipment, { receive: false });
   attachmentPoint.add(equipment);
   return equipment;
 }
@@ -786,7 +764,6 @@ class Actor {
     this.spawnPosition = position.clone();
     this.visual = SkeletonUtils.clone(source.scene);
     alignVisualToGround(this.visual, height);
-    setShadows(this.visual);
     this.handWeapon = null;
     this.backWeapon = null;
     this.weaponSheathed = false;
@@ -948,15 +925,13 @@ function createStatic(assetKey, {
   height,
   colliderWidth = 0,
   colliderDepth = 0,
-  castShadow = false,
-  receiveShadow = false,
   parent = null,
+  colliders = staticColliders,
 } = {}) {
   const source = assets.get(assetKey);
   const root = new THREE.Group();
   const visual = source.scene.clone(true);
   fitStaticVisual(visual, { width, depth, height });
-  setShadows(visual, { cast: castShadow, receive: receiveShadow });
   root.add(visual);
   root.position.set(x, y, z);
   root.rotation.y = rotationY;
@@ -971,64 +946,9 @@ function createStatic(assetKey, {
       maxZ: z + (quarterTurn ? colliderWidth : colliderDepth) / 2,
     };
     root.userData.staticCollider = collider;
-    staticColliders.push(collider);
+    colliders.push(collider);
   }
   return root;
-}
-
-function addTownObject(object) {
-  townWorldGroup.add(object);
-  return object;
-}
-
-function createTownStatic(assetKey, {
-  x = 0,
-  y = 0,
-  z = 0,
-  rotationY = 0,
-  width,
-  depth,
-  height,
-  colliderWidth = 0,
-  colliderDepth = 0,
-} = {}) {
-  const source = assets.get(assetKey);
-  const root = new THREE.Group();
-  const visual = source.scene.clone(true);
-  fitStaticVisual(visual, { width, depth, height });
-  setShadows(visual);
-  root.add(visual);
-  root.position.set(x, y, z);
-  root.rotation.y = rotationY;
-  addTownObject(root);
-  if (colliderWidth > 0 && colliderDepth > 0) {
-    const quarterTurn = Math.abs(Math.sin(rotationY)) > 0.5;
-    townStaticColliders.push({
-      root,
-      minX: x - (quarterTurn ? colliderDepth : colliderWidth) / 2,
-      maxX: x + (quarterTurn ? colliderDepth : colliderWidth) / 2,
-      minZ: z - (quarterTurn ? colliderWidth : colliderDepth) / 2,
-      maxZ: z + (quarterTurn ? colliderWidth : colliderDepth) / 2,
-    });
-  }
-  return root;
-}
-
-function addTownBox({ x, y, z, width, height, depth, material, colliderWidth = 0, colliderDepth = 0 }) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-  mesh.position.set(x, y, z);
-  mesh.receiveShadow = false;
-  addTownObject(mesh);
-  if (colliderWidth > 0 && colliderDepth > 0) {
-    townStaticColliders.push({
-      root: mesh,
-      minX: x - colliderWidth / 2,
-      maxX: x + colliderWidth / 2,
-      minZ: z - colliderDepth / 2,
-      maxZ: z + colliderDepth / 2,
-    });
-  }
-  return mesh;
 }
 
 function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
@@ -1055,8 +975,6 @@ function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
   visual.position.y -= tempBox.min.y;
   visual.position.z -= center.z;
   visual.updateMatrixWorld(true);
-  setShadows(visual);
-
   root.add(visual);
   root.position.set(x, 0, z);
   const localSpanAlongX = localSpanAxis === 'x';
@@ -1100,8 +1018,6 @@ function createFloorTiles(placements) {
     if (!child.isMesh) return;
     const tiles = new THREE.InstancedMesh(child.geometry, child.material, placements.length);
     tiles.name = 'instanced-floor-tiles';
-    tiles.castShadow = false;
-    tiles.receiveShadow = false;
     placements.forEach(({ x, z }, index) => {
       translation.makeTranslation(x, 0, z);
       instanceMatrix.multiplyMatrices(translation, child.matrixWorld);
@@ -1121,15 +1037,12 @@ function addBox({
   height,
   depth,
   material,
-  castShadow = false,
   colliderWidth = 0,
   colliderDepth = 0,
   parent = null,
 }) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
   mesh.position.set(x, y, z);
-  mesh.castShadow = castShadow;
-  mesh.receiveShadow = false;
   addWorldObject(mesh, parent);
   if (colliderWidth > 0 && colliderDepth > 0) {
     const collider = {
@@ -1148,7 +1061,6 @@ function addBox({
 function addPointLight(x, z, color = 0xffbd74, intensity = 2.4) {
   const light = new THREE.PointLight(color, intensity, 7, 2);
   light.position.set(x, 2.2, z);
-  light.castShadow = false;
   addWorldObject(light);
 }
 
@@ -1156,7 +1068,6 @@ function buildLighting() {
   scene.add(new THREE.HemisphereLight(0x8886b3, 0x17131b, 1.7));
   moonLight = new THREE.DirectionalLight(0xc8c9ff, 2.1);
   moonLight.position.set(-5, 12, 7);
-  moonLight.castShadow = false;
   scene.add(moonLight, moonLight.target);
 }
 
@@ -1589,7 +1500,6 @@ function buildCrypt() {
   underfloor.position.y = -0.08;
   underfloor.position.x = (WORLD.minX + WORLD.maxX) / 2;
   underfloor.position.z = (WORLD.minZ + WORLD.maxZ) / 2;
-  underfloor.receiveShadow = false;
   scene.add(underfloor);
 
   const grid = new THREE.GridHelper(120, 60, 0x525168, 0x292a3a);
@@ -2108,32 +2018,33 @@ function buildTown() {
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(0, -0.08, 0.5);
-  addTownObject(ground);
-  addTownBox({ x: 0, y: -0.015, z: 3.8, width: 4.2, height: 0.08, depth: 23, material: roadMaterial });
-  addTownBox({ x: 0, y: -0.012, z: 3.8, width: 30, height: 0.06, depth: 3.1, material: roadMaterial });
-  addTownBox({ x: 0, y: 0.01, z: 3.8, width: 1.15, height: 0.08, depth: 23, material: roadEdgeMaterial });
+  townWorldGroup.add(ground);
+  addBox({ x: 0, y: -0.015, z: 3.8, width: 4.2, height: 0.08, depth: 23, material: roadMaterial, parent: townWorldGroup });
+  addBox({ x: 0, y: -0.012, z: 3.8, width: 30, height: 0.06, depth: 3.1, material: roadMaterial, parent: townWorldGroup });
+  addBox({ x: 0, y: 0.01, z: 3.8, width: 1.15, height: 0.08, depth: 23, material: roadEdgeMaterial, parent: townWorldGroup });
 
-  createTownStatic('townHomeA', { x: -10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8 });
-  createTownStatic('townHomeB', { x: 10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8 });
-  createTownStatic('townTavern', { x: 0, z: -8.5, height: 4.8, colliderWidth: 6.3, colliderDepth: 5.4 });
-  createTownStatic('townMarket', { x: -10.1, z: 8, height: 3.8, rotationY: Math.PI, colliderWidth: 5.1, colliderDepth: 3.4 });
-  createTownStatic('townBlacksmith', { x: 10.1, z: 3.8, height: 3.8, colliderWidth: 5.1, colliderDepth: 3.4 });
-  createTownStatic('townWell', { x: 0, z: 3.4, height: 2.9, colliderWidth: 2.8, colliderDepth: 2.8 });
-  createTownStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 5, rotationY: Math.PI / 2 });
-  createTownStatic('townTarget', { x: 8.1, z: 10.2, height: 1.7, rotationY: Math.PI / 2 });
-  createTownStatic('archGate', { x: 0, z: 14.2, width: 4.8, height: 4.4 });
-  createTownStatic('townMarketStandA', { x: -12.2, z: 0.8, height: 2.1, rotationY: Math.PI / 2 });
-  createTownStatic('townMarketStandB', { x: -9.4, z: 0.8, height: 1.9, rotationY: Math.PI / 2 });
-  createTownStatic('townCart', { x: -6.7, z: -0.8, height: 2.9, rotationY: 0, colliderWidth: 1.8, colliderDepth: 3.4 });
-  createTownStatic('townBarrel', { x: 7.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
-  createTownStatic('townBarrel', { x: 8.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8 });
-  createTownStatic('townBench', { x: -4.5, z: 8.1, height: 0.8, rotationY: Math.PI / 2 });
+  const townStatic = { parent: townWorldGroup, colliders: townStaticColliders };
+  createStatic('townHomeA', { x: -10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8, ...townStatic });
+  createStatic('townHomeB', { x: 10.5, z: -7.2, height: 4.3, colliderWidth: 5.7, colliderDepth: 4.8, ...townStatic });
+  createStatic('townTavern', { x: 0, z: -8.5, height: 4.8, colliderWidth: 6.3, colliderDepth: 5.4, ...townStatic });
+  createStatic('townMarket', { x: -10.1, z: 8, height: 3.8, rotationY: Math.PI, colliderWidth: 5.1, colliderDepth: 3.4, ...townStatic });
+  createStatic('townBlacksmith', { x: 10.1, z: 3.8, height: 3.8, colliderWidth: 5.1, colliderDepth: 3.4, ...townStatic });
+  createStatic('townWell', { x: 0, z: 3.4, height: 2.9, colliderWidth: 2.8, colliderDepth: 2.8, ...townStatic });
+  createStatic('townArcheryRange', { x: 5.4, z: 10.2, height: 5, rotationY: Math.PI / 2, ...townStatic });
+  createStatic('townTarget', { x: 8.1, z: 10.2, height: 1.7, rotationY: Math.PI / 2, ...townStatic });
+  createStatic('archGate', { x: 0, z: 14.2, width: 4.8, height: 4.4, ...townStatic });
+  createStatic('townMarketStandA', { x: -12.2, z: 0.8, height: 2.1, rotationY: Math.PI / 2, ...townStatic });
+  createStatic('townMarketStandB', { x: -9.4, z: 0.8, height: 1.9, rotationY: Math.PI / 2, ...townStatic });
+  createStatic('townCart', { x: -6.7, z: -0.8, height: 2.9, rotationY: 0, colliderWidth: 1.8, colliderDepth: 3.4, ...townStatic });
+  createStatic('townBarrel', { x: 7.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8, ...townStatic });
+  createStatic('townBarrel', { x: 8.1, z: 1.1, height: 0.9, colliderWidth: 0.8, colliderDepth: 0.8, ...townStatic });
+  createStatic('townBench', { x: -4.5, z: 8.1, height: 0.8, rotationY: Math.PI / 2, ...townStatic });
 
   for (const x of [-15, -11, 11, 15]) {
-    createTownStatic('townFence', { x, z: -13.3, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
+    createStatic('townFence', { x, z: -13.3, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35, ...townStatic });
   }
   for (const x of [-15, -11, 11, 15]) {
-    createTownStatic('townFence', { x, z: 15.2, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35 });
+    createStatic('townFence', { x, z: 15.2, height: 1.35, rotationY: 0, colliderWidth: 2.4, colliderDepth: 0.35, ...townStatic });
   }
 
   buildTownActors();
@@ -2150,20 +2061,6 @@ function buildWorld() {
   buildBlobShadows();
   updateHealthUi();
   updateQuestUi();
-}
-
-function nearestLivingEnemy(maxDistance = Infinity) {
-  let nearest = null;
-  let nearestDistance = maxDistance;
-  for (const enemy of enemies) {
-    if (enemy.dead || !isEnemyAccessible(enemy)) continue;
-    const distance = player.root.position.distanceTo(enemy.root.position);
-    if (distance < nearestDistance) {
-      nearest = enemy;
-      nearestDistance = distance;
-    }
-  }
-  return nearest;
 }
 
 function countLivingEnemies() {
@@ -2630,7 +2527,6 @@ function createLootVisual(itemId, position) {
     roughness: 0.35,
     metalness: item.kind === 'equipment' ? 0.65 : 0.18,
   }));
-  core.castShadow = false;
   root.add(core);
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(0.34, 0.025, 8, 28),
