@@ -791,7 +791,13 @@ class Actor {
     this.backWeapon = null;
     this.weaponSheathed = false;
     if (type === 'player') {
-      this.handWeapon = attachEquipment(this.visual, 'sword', 'handslot.r', { scale: 1.05 });
+      this.handWeapon = attachEquipment(this.visual, 'sword', 'hand.r', {
+        scale: 1.05,
+        // The exported sword origin sits just below the grip. Rotate the
+        // blade forward from the hand and pull that grip back onto the bone.
+        position: [0.16, 0, 0],
+        rotation: [0, 0, Math.PI / 2],
+      });
       this.backWeapon = attachEquipment(this.visual, 'sword', 'chest', {
         scale: 1.05,
         position: [0.06, 0.18, -0.18],
@@ -825,6 +831,7 @@ class Actor {
     this.speed = speed;
     this.profileKey = profileKey;
     this.roomId = roomId;
+    this.townPatrol = null;
     this.dead = false;
     this.awake = type === 'player';
     this.evading = false;
@@ -1959,7 +1966,7 @@ function buildActors() {
 }
 
 function buildTownActors() {
-  townNpcs.push(spawnActor({
+  const rowan = spawnActor({
     assetKey: 'ranger',
     type: 'npc',
     name: 'Ranger Rowan',
@@ -1968,8 +1975,8 @@ function buildTownActors() {
     z: 10.15,
     height: 1.85,
     sceneRoot: townScene,
-  }));
-  townNpcs.push(spawnActor({
+  });
+  const elin = spawnActor({
     assetKey: 'knight',
     type: 'npc',
     name: 'Guard Elin',
@@ -1978,21 +1985,102 @@ function buildTownActors() {
     z: 3.8,
     height: 1.8,
     sceneRoot: townScene,
-  }));
-  townNpcs.push(spawnActor({
+  });
+  const vale = spawnActor({
     assetKey: 'rogue',
     type: 'npc',
     name: 'Tinker Vale',
     role: 'Artificer',
-    x: 7.1,
-    z: 3.5,
+    x: 6.6,
+    z: 3.8,
     height: 1.75,
     sceneRoot: townScene,
-  }));
+  });
+  townNpcs.push(rowan, elin, vale);
+  configureTownPatrol(elin, [
+    { x: -6.6, z: 3.8 },
+    { x: -2.2, z: 3.8 },
+    { x: -2.2, z: 5.8 },
+    { x: 0, z: 5.8 },
+    { x: 0, z: 12.8 },
+    { x: 2.2, z: 12.8 },
+    { x: 2.2, z: 5.8 },
+    { x: 2.2, z: 3.8 },
+    { x: 6.6, z: 3.8 },
+    { x: 2.2, z: 3.8 },
+    { x: 2.2, z: 5.8 },
+    { x: 0, z: 5.8 },
+    { x: -2.2, z: 5.8 },
+    { x: -2.2, z: 3.8 },
+  ], { speed: 1.25, pause: 0.45 });
+  configureTownPatrol(vale, [
+    { x: 2.8, z: 3.8 },
+    { x: 6.6, z: 3.8 },
+  ], { speed: 0.9, pause: 0.8 });
+  configureTownPatrol(rowan, [
+    { x: 0, z: 13.1 },
+    { x: 0, z: 10.2 },
+    { x: 3.7, z: 10.2 },
+    { x: 0, z: 10.2 },
+  ], { speed: 1.1, pause: 0.7 });
   townNpcs.forEach((npc) => {
     npc.awake = true;
     npc.play(['idle', 'idle_combat'], { force: true });
   });
+}
+
+function configureTownPatrol(actor, waypoints, { speed = 1.1, pause = 0.6 } = {}) {
+  actor.townPatrol = {
+    waypoints: waypoints.map(({ x, z }) => new THREE.Vector3(x, 0, z)),
+    targetIndex: 0,
+    speed,
+    pause,
+    pauseTimer: 0,
+  };
+}
+
+function updateTownNpcPatrol(npc, delta) {
+  const patrol = npc.townPatrol;
+  if (!patrol || patrol.waypoints.length < 2) return false;
+
+  const target = patrol.waypoints[patrol.targetIndex];
+  if (patrol.pauseTimer > 0) {
+    patrol.pauseTimer = Math.max(0, patrol.pauseTimer - delta);
+    tempVector.subVectors(target, npc.root.position);
+    tempVector.y = 0;
+    npc.faceDirection(tempVector);
+    npc.play(['idle_combat', 'idle']);
+    return true;
+  }
+
+  tempVector.subVectors(target, npc.root.position);
+  tempVector.y = 0;
+  const distance = tempVector.length();
+  if (distance <= 0.14) {
+    npc.root.position.set(target.x, 0, target.z);
+    patrol.targetIndex = (patrol.targetIndex + 1) % patrol.waypoints.length;
+    patrol.pauseTimer = patrol.pause;
+    tempVector.subVectors(patrol.waypoints[patrol.targetIndex], npc.root.position);
+    tempVector.y = 0;
+    npc.faceDirection(tempVector);
+    npc.play(['idle_combat', 'idle']);
+    return true;
+  }
+
+  tempVector.multiplyScalar(1 / distance);
+  const previousX = npc.root.position.x;
+  const previousZ = npc.root.position.z;
+  const step = Math.min(distance, patrol.speed * delta);
+  moveActorWithinMap(npc, tempVector.x * step, tempVector.z * step, 0.55);
+  if (Math.abs(npc.root.position.x - previousX) + Math.abs(npc.root.position.z - previousZ) < 0.0001) {
+    patrol.targetIndex = (patrol.targetIndex + 1) % patrol.waypoints.length;
+    patrol.pauseTimer = patrol.pause;
+    npc.play(['idle_combat', 'idle']);
+    return true;
+  }
+  npc.faceDirection(tempVector);
+  npc.play(['running', 'walking', 'idle_combat']);
+  return true;
 }
 
 function buildTownLighting() {
@@ -3978,8 +4066,10 @@ function onKeyUp(event) {
 function updateTownActors(delta) {
   for (const npc of townNpcs) {
     npc.update(delta);
-    npc.face(player.root.position);
-    npc.play(['idle', 'idle_combat']);
+    if (!updateTownNpcPatrol(npc, delta)) {
+      npc.face(player.root.position);
+      npc.play(['idle', 'idle_combat']);
+    }
   }
 }
 
