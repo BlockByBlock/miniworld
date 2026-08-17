@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { brickWallDimensions } from './crypt-wall-geometry.js';
 import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
@@ -1016,12 +1017,11 @@ function addWallSpan({ fixed, start, end, openings = [], horizontal, parent = nu
   for (const [openStart, openEnd] of clippedOpenings) {
     if (openStart - cursor > 0.45) {
       const length = openStart - cursor;
+      const wallDimensions = brickWallDimensions({ horizontal, length, thickness: 0.5 });
       addBrickWall({
         x: horizontal ? (cursor + openStart) / 2 : fixed,
         z: horizontal ? fixed : (cursor + openStart) / 2,
-        width: horizontal ? length : 0.5,
-        depth: horizontal ? 0.5 : length,
-        rotationY: horizontal ? 0 : Math.PI / 2,
+        ...wallDimensions,
         parent,
       });
     }
@@ -1029,12 +1029,11 @@ function addWallSpan({ fixed, start, end, openings = [], horizontal, parent = nu
   }
   if (end - cursor > 0.45) {
     const length = end - cursor;
+    const wallDimensions = brickWallDimensions({ horizontal, length, thickness: 0.5 });
     addBrickWall({
       x: horizontal ? (cursor + end) / 2 : fixed,
       z: horizontal ? fixed : (cursor + end) / 2,
-      width: horizontal ? length : 0.5,
-      depth: horizontal ? 0.5 : length,
-      rotationY: horizontal ? 0 : Math.PI / 2,
+      ...wallDimensions,
       parent,
     });
   }
