@@ -9,7 +9,15 @@ import { loadWorldData, validateWorldData, WORLD_DATA } from '../src/world-data.
 test('loads the canonical registry and derives runtime maps', () => {
   assert.equal(WORLD_DATA.rooms.length, 11);
   assert.equal(WORLD_DATA.corridors.length, 10);
-  assert.equal(Object.keys(WORLD_DATA.assets).length, 52);
+  assert.equal(Object.keys(WORLD_DATA.assets).length, 55);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(WORLD_DATA.assets).filter(([id]) => ['wall', 'wallCorner', 'banner'].includes(id))),
+    {
+      wall: '/assets/models/dungeon/wall.glb',
+      wallCorner: '/assets/models/dungeon/wall_corner.glb',
+      banner: '/assets/models/dungeon/banner_red.glb',
+    },
+  );
   assert.equal(Object.keys(WORLD_DATA.actions).length, 5);
   assert.equal(Object.keys(WORLD_DATA.items).length, 5);
   assert.equal(Object.keys(WORLD_DATA.enemyProfiles).length, 5);

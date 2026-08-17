@@ -381,7 +381,7 @@ function alignVisualToGround(visual, desiredHeight) {
   visual.updateMatrixWorld(true);
 }
 
-function fitStaticVisual(visual, { width, depth, height } = {}) {
+function fitStaticVisual(visual, { width, depth, height, stretch = false } = {}) {
   visual.updateMatrixWorld(true);
   tempBox.setFromObject(visual);
   tempBox.getSize(tempSize);
@@ -390,7 +390,13 @@ function fitStaticVisual(visual, { width, depth, height } = {}) {
   if (depth && tempSize.z > 0.001) factors.push(depth / tempSize.z);
   if (height && tempSize.y > 0.001) factors.push(height / tempSize.y);
   if (factors.length) {
-    visual.scale.multiplyScalar(Math.min(...factors));
+    if (stretch) {
+      if (width && tempSize.x > 0.001) visual.scale.x *= width / tempSize.x;
+      if (depth && tempSize.z > 0.001) visual.scale.z *= depth / tempSize.z;
+      if (height && tempSize.y > 0.001) visual.scale.y *= height / tempSize.y;
+    } else {
+      visual.scale.multiplyScalar(Math.min(...factors));
+    }
     visual.updateMatrixWorld(true);
     tempBox.setFromObject(visual);
   }
@@ -674,6 +680,7 @@ function createStatic(assetKey, {
   width,
   depth,
   height,
+  stretch = false,
   colliderWidth = 0,
   colliderDepth = 0,
   castShadow = false,
@@ -683,7 +690,7 @@ function createStatic(assetKey, {
   const source = assets.get(assetKey);
   const root = new THREE.Group();
   const visual = source.scene.clone(true);
-  fitStaticVisual(visual, { width, depth, height });
+  fitStaticVisual(visual, { width, depth, height, stretch });
   setShadows(visual, { cast: castShadow, receive: receiveShadow });
   root.add(visual);
   root.position.set(x, y, z);
@@ -976,7 +983,31 @@ function updateBlobShadows() {
   shadowMesh.instanceMatrix.needsUpdate = true;
 }
 
-function addWallSpan({ fixed, start, end, openings = [], horizontal, material }) {
+function addBrickWall({
+  x,
+  z,
+  width,
+  depth,
+  rotationY = 0,
+  colliderWidth = 0,
+  colliderDepth = 0,
+  parent = null,
+}) {
+  return createStatic('wall', {
+    x,
+    z,
+    rotationY,
+    width,
+    depth,
+    height: 2.7,
+    stretch: true,
+    colliderWidth,
+    colliderDepth,
+    parent,
+  });
+}
+
+function addWallSpan({ fixed, start, end, openings = [], horizontal, parent = null }) {
   const clippedOpenings = openings
     .map(([openStart, openEnd]) => [Math.max(start, openStart), Math.min(end, openEnd)])
     .filter(([openStart, openEnd]) => openEnd - openStart > 0.1)
@@ -985,33 +1016,31 @@ function addWallSpan({ fixed, start, end, openings = [], horizontal, material })
   for (const [openStart, openEnd] of clippedOpenings) {
     if (openStart - cursor > 0.45) {
       const length = openStart - cursor;
-      addBox({
+      addBrickWall({
         x: horizontal ? (cursor + openStart) / 2 : fixed,
-        y: 1.35,
         z: horizontal ? fixed : (cursor + openStart) / 2,
         width: horizontal ? length : 0.5,
-        height: 2.7,
         depth: horizontal ? 0.5 : length,
-        material,
+        rotationY: horizontal ? 0 : Math.PI / 2,
+        parent,
       });
     }
     cursor = Math.max(cursor, openEnd);
   }
   if (end - cursor > 0.45) {
     const length = end - cursor;
-    addBox({
+    addBrickWall({
       x: horizontal ? (cursor + end) / 2 : fixed,
-      y: 1.35,
       z: horizontal ? fixed : (cursor + end) / 2,
       width: horizontal ? length : 0.5,
-      height: 2.7,
       depth: horizontal ? 0.5 : length,
-      material,
+      rotationY: horizontal ? 0 : Math.PI / 2,
+      parent,
     });
   }
 }
 
-function buildRoomWalls(room, wallMaterial) {
+function buildRoomWalls(room) {
   const openings = room.openings ?? {};
   addWallSpan({
     fixed: room.minZ,
@@ -1019,7 +1048,6 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxX,
     openings: openings.north,
     horizontal: true,
-    material: wallMaterial,
   });
   addWallSpan({
     fixed: room.maxZ,
@@ -1027,7 +1055,6 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxX,
     openings: openings.south,
     horizontal: true,
-    material: wallMaterial,
   });
   addWallSpan({
     fixed: room.minX,
@@ -1035,7 +1062,6 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxZ,
     openings: openings.west,
     horizontal: false,
-    material: wallMaterial,
   });
   addWallSpan({
     fixed: room.maxX,
@@ -1043,7 +1069,16 @@ function buildRoomWalls(room, wallMaterial) {
     end: room.maxZ,
     openings: openings.east,
     horizontal: false,
-    material: wallMaterial,
+  });
+
+  const corners = [
+    [room.minX, room.minZ, 0],
+    [room.maxX, room.minZ, -Math.PI / 2],
+    [room.maxX, room.maxZ, Math.PI],
+    [room.minX, room.maxZ, Math.PI / 2],
+  ];
+  corners.forEach(([x, z, rotationY]) => {
+    addDecoration('wallCorner', x, z, { height: 2.7, rotationY });
   });
 }
 
@@ -1140,6 +1175,8 @@ function decorateRoom(room) {
     addColumn(7.5, 31);
     addWallTorch(room, 'west', 27);
     addWallTorch(room, 'east', 27);
+    addDecoration('banner', room.minX + 0.7, 27, { height: 2.65, rotationY: Math.PI / 2 });
+    addDecoration('banner', room.maxX - 0.7, 27, { height: 2.65, rotationY: -Math.PI / 2 });
     addDecoration('candleTriple', -8.4, 29.2, { height: 0.48 });
     addDecoration('candleTriple', 8.4, 24.8, { height: 0.48, rotationY: Math.PI / 2 });
     addRoomLight(room, 0xffbd74, 1.5);
@@ -1150,6 +1187,8 @@ function decorateRoom(room) {
     addWallTorch(room, 'north', 9);
     addWallTorch(room, 'south', -9);
     addWallTorch(room, 'south', 9);
+    addDecoration('banner', room.minX + 0.7, 10, { height: 2.65, rotationY: Math.PI / 2 });
+    addDecoration('banner', room.maxX - 0.7, 10, { height: 2.65, rotationY: -Math.PI / 2 });
     addDecoration('rubbleHalf', -12.1, 3.4, { width: 1.8 });
     addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
     addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
@@ -1326,11 +1365,6 @@ function buildCrypt() {
   grid.material.opacity = 0.11;
   scene.add(grid);
 
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: 0x171928,
-    roughness: 0.96,
-    metalness: 0.02,
-  });
   const corridorMaterial = new THREE.MeshStandardMaterial({
     color: 0x34374a,
     roughness: 0.9,
@@ -1342,7 +1376,7 @@ function buildCrypt() {
       const floorPlacements = [];
       tileZone(room, floorPlacements);
       createFloorTiles(floorPlacements);
-      buildRoomWalls(room, wallMaterial);
+      buildRoomWalls(room);
       decorateRoom(room);
     });
   }
@@ -1362,7 +1396,6 @@ function buildCrypt() {
       createFloorTiles(floorPlacements);
     });
   }
-  return wallMaterial;
 }
 
 function spawnActor({ assetKey, type, name, role, x, z, height, maxHp, speed, profileKey, roomId, sceneRoot = scene }) {
@@ -1436,7 +1469,7 @@ function setGateWallFrameVisible(gate, roomId, visible) {
   });
 }
 
-function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wallMaterial }) {
+function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth }) {
   const { x, z } = gateWallPosition(corridor, roomId, travelsAlongZ);
   const wallThickness = 0.5;
   const parent = zoneRenderGroups.get(corridor.id);
@@ -1449,14 +1482,11 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wal
     ];
     for (const [startX, endX] of wallSections) {
       const sideWidth = endX - startX;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x: (startX + endX) / 2,
-        y: 1.35,
         z,
         width: sideWidth,
-        height: 2.7,
         depth: wallThickness,
-        material: wallMaterial,
         colliderWidth: sideWidth,
         colliderDepth: wallThickness,
         parent,
@@ -1469,16 +1499,14 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wal
     ];
     for (const [startZ, endZ] of wallSections) {
       const sideWidth = endZ - startZ;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x,
-        y: 1.35,
         z: (startZ + endZ) / 2,
-        width: wallThickness,
-        height: 2.7,
-        depth: sideWidth,
-        material: wallMaterial,
-        colliderWidth: wallThickness,
-        colliderDepth: sideWidth,
+        width: sideWidth,
+        depth: wallThickness,
+        rotationY: Math.PI / 2,
+        colliderWidth: sideWidth,
+        colliderDepth: wallThickness,
         parent,
       }));
     }
@@ -1487,7 +1515,7 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth, wal
   return wallRoots;
 }
 
-function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth, wallMaterial }) {
+function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth }) {
   const corridorX = (corridor.minX + corridor.maxX) / 2;
   const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
   const endpointPositions = roomIds.map((roomId) => gateWallPosition(corridor, roomId, travelsAlongZ));
@@ -1505,14 +1533,11 @@ function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth
     ];
     for (const [startX, endX] of wallSections) {
       const sideWidth = endX - startX;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x: (startX + endX) / 2,
-        y: 1.35,
         z: (minZ + maxZ) / 2,
         width: sideWidth,
-        height: 2.7,
         depth: wallDepth,
-        material: wallMaterial,
         colliderWidth: sideWidth,
         colliderDepth: wallDepth,
         parent,
@@ -1528,14 +1553,11 @@ function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth
     ];
     for (const [startZ, endZ] of wallSections) {
       const sideWidth = endZ - startZ;
-      wallRoots.push(addBox({
+      wallRoots.push(addBrickWall({
         x: (minX + maxX) / 2,
-        y: 1.35,
         z: (startZ + endZ) / 2,
         width: wallWidth,
-        height: 2.7,
         depth: sideWidth,
-        material: wallMaterial,
         colliderWidth: wallWidth,
         colliderDepth: sideWidth,
         parent,
@@ -1546,7 +1568,7 @@ function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth
   return wallRoots;
 }
 
-function buildGates(wallMaterial) {
+function buildGates() {
   state.gates = MAP.corridors.map((corridor) => {
     const roomIds = (ZONE_NEIGHBORS.get(corridor.id) ?? []).filter((id) => ROOM_IDS.has(id));
     if (roomIds.length !== 2) {
@@ -1570,14 +1592,12 @@ function buildGates(wallMaterial) {
       roomIds,
       travelsAlongZ,
       openingWidth,
-      wallMaterial,
     });
     const wallFrames = new Map(roomIds.map((roomId) => [roomId, buildGateWallFrame({
       corridor,
       roomId,
       travelsAlongZ,
       openingWidth,
-      wallMaterial,
     })]));
     wallFrames.get(roomIds[1]).forEach((root) => {
       root.visible = false;
@@ -1751,9 +1771,9 @@ function buildTown() {
 
 function buildWorld() {
   buildLighting();
-  const wallMaterial = buildCrypt();
+  buildCrypt();
   buildChests();
-  buildGates(wallMaterial);
+  buildGates();
   buildActors();
   buildTown();
   buildBlobShadows();
