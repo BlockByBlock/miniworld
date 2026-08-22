@@ -159,7 +159,6 @@ const zoneRenderGroups = new Map();
 const visibleZoneIds = new Set();
 
 let activeWorldGroup = null;
-
 const dungeonScene = new THREE.Scene();
 const townScene = new THREE.Scene();
 const scene = dungeonScene;
@@ -802,10 +801,51 @@ function addBox({
   return mesh;
 }
 
-function addPointLight(x, z, color = 0xffbd74, intensity = 2.4) {
-  const light = new THREE.PointLight(color, intensity, 7, 2);
-  light.position.set(x, 2.2, z);
-  addWorldObject(light);
+// Point-light pool: the dungeon uses a fixed set of always-visible lights whose
+// positions/colors/intensities are re-applied per zone view. Keeping the visible
+// light count constant avoids shader program recompilation hitches when rooms
+// toggle visibility.
+const DUNGEON_LIGHT_POOL_SIZE = 4;
+const DUNGEON_LIGHT_DEFAULT = { color: 0xffbd74, intensity: 2.4 };
+
+let dungeonLightPool = [];
+const dungeonZoneLights = new Map();
+
+function recordZoneLight(zoneId, { x, z, color = 0xffbd74, intensity = 2.4 }) {
+  if (!dungeonZoneLights.has(zoneId)) dungeonZoneLights.set(zoneId, []);
+  dungeonZoneLights.get(zoneId).push({ x, z, color, intensity });
+}
+
+function applyDungeonLights() {
+  const recipes = [];
+  for (const zoneId of visibleZoneIds) {
+    for (const recipe of dungeonZoneLights.get(zoneId) ?? []) {
+      if (recipes.length < DUNGEON_LIGHT_POOL_SIZE) recipes.push(recipe);
+    }
+  }
+  for (let index = 0; index < dungeonLightPool.length; index += 1) {
+    const light = dungeonLightPool[index];
+    const recipe = recipes[index];
+    if (!recipe) {
+      // Lights stay in the scene and "on" at all times; unused slots drop to
+      // zero intensity so the shader's light count never changes.
+      light.position.set(0, -50, 0);
+      light.intensity = 0;
+      continue;
+    }
+    light.color.set(recipe.color);
+    light.intensity = recipe.intensity;
+    light.position.set(recipe.x, 2.2, recipe.z);
+  }
+}
+
+function buildDungeonLightPool() {
+  for (let index = 0; index < DUNGEON_LIGHT_POOL_SIZE; index += 1) {
+    const light = new THREE.PointLight(DUNGEON_LIGHT_DEFAULT.color, 0, 7, 2);
+    light.position.set(0, -50, 0);
+    dungeonScene.add(light);
+    dungeonLightPool.push(light);
+  }
 }
 
 function buildLighting() {
@@ -1085,7 +1125,7 @@ function addWallTorch(room, wall, along) {
 
 function addRoomLight(room, color, intensity = 1.35) {
   const center = roomCenter(room);
-  addPointLight(center.x, center.z, color, intensity);
+  recordZoneLight(room.id, { x: center.x, z: center.z, color, intensity });
 }
 
 function decorateRoom(room) {
@@ -1114,9 +1154,9 @@ function decorateRoom(room) {
     addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
     addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
     addRoomLight(room, 0xffa767, 1.75);
-    addPointLight(-6.1, 4.25);
-    addPointLight(6.1, 4.25, 0xffa767, 2.6);
-    addPointLight(0, -4.75, 0x8e9aff, 2.2);
+    recordZoneLight('hub', { x: -6.1, z: 4.25 });
+    recordZoneLight('hub', { x: 6.1, z: 4.25, color: 0xffa767, intensity: 2.6 });
+    recordZoneLight('hub', { x: 0, z: -4.75, color: 0x8e9aff, intensity: 2.2 });
   } else if (room.id === 'westGate') {
     for (const x of [-30, -26, -22]) {
       addTomb(x, 4.4, Math.PI / 2, 0.82);
@@ -1691,6 +1731,7 @@ function buildTown() {
 }
 
 function buildWorld() {
+  buildDungeonLightPool();
   buildLighting();
   buildCrypt();
   buildChests();
@@ -1747,6 +1788,8 @@ function updateZoneVisibility(roomId, force = false) {
   zoneRenderGroups.forEach((group, id) => {
     group.visible = visibleZoneIds.has(id);
   });
+  applyDungeonLights();
+  if (window.__cryptProfile) window.__cryptProfile.zones.push({ t: performance.now(), visible: [...visibleZoneIds] });
 }
 
 function showDialogue(npcName, copy, duration = 2400) {
@@ -2311,8 +2354,11 @@ function openGate(gate) {
 
 function chestBlockReason(chest) {
   if (!chest || chest.opened) return '';
-  if (chest.kind === 'seal' && livingEnemiesInBranch(chest.branch).length > 0) {
-    return `The ${chest.branch}ern seal remains warded by ${livingEnemiesInBranch(chest.branch).length} guardian${livingEnemiesInBranch(chest.branch).length === 1 ? '' : 's'}.`;
+  if (chest.kind === 'seal') {
+    const guardians = livingEnemiesInBranch(chest.branch).length;
+    if (guardians > 0) {
+      return `The ${chest.branch}ern seal remains warded by ${guardians} guardian${guardians === 1 ? '' : 's'}.`;
+    }
   }
   if (chest.kind === 'archive' && livingEnemiesInBranch('north', { includeWarden: false }).length > 0) {
     return 'The Archive cache remains sealed while its acolytes stand.';
@@ -2418,14 +2464,36 @@ function updateInterface(delta, force = false) {
   updateInteractionUi();
 }
 
+// Burst particles share one frozen geometry and draw from a ring buffer of
+// pooled meshes. Each particle keeps its own material so randomized lifetimes
+// can fade independently; the pool only avoids per-burst allocations.
+const BURST_POOL_SIZE = 160;
+let burstGeometry = null;
+const burstPool = [];
+let burstCursor = 0;
+
+function acquireBurstMesh() {
+  if (!burstGeometry) burstGeometry = new THREE.SphereGeometry(0.055, 6, 6);
+  let entry = burstPool[burstCursor];
+  if (!entry) {
+    const mesh = new THREE.Mesh(burstGeometry, new THREE.MeshBasicMaterial({ transparent: true }));
+    entry = { mesh };
+    burstPool.push(entry);
+  }
+  const mesh = entry.mesh;
+  if (!mesh.parent) scene.add(mesh);
+  mesh.visible = true;
+  burstCursor = (burstCursor + 1) % BURST_POOL_SIZE;
+  return mesh;
+}
+
 function spawnBurst(position, color = 0xf0c071, count = 12) {
-  const geometry = new THREE.SphereGeometry(0.055, 6, 6);
-  const material = new THREE.MeshBasicMaterial({ color, transparent: true });
   for (let index = 0; index < count; index += 1) {
-    const mesh = new THREE.Mesh(geometry, material.clone());
+    const mesh = acquireBurstMesh();
+    mesh.material.color.set(color);
+    mesh.material.opacity = 1;
     mesh.position.copy(position);
     mesh.position.y += 0.55;
-    scene.add(mesh);
     const angle = (index / count) * Math.PI * 2;
     effects.push({
       mesh,
@@ -2855,11 +2923,10 @@ function updateEffects(delta) {
     effect.life -= delta;
     effect.velocity.y -= delta * 2.8;
     effect.mesh.position.addScaledVector(effect.velocity, delta);
-    effect.mesh.material.opacity = Math.max(0, effect.life);
+    effect.mesh.material.opacity = Math.min(1, Math.max(0, effect.life));
     if (effect.life <= 0) {
-      scene.remove(effect.mesh);
-      effect.mesh.geometry.dispose();
-      effect.mesh.material.dispose();
+      // Return the mesh to the pool; geometry and material stay alive.
+      effect.mesh.visible = false;
       effects.splice(index, 1);
     }
   }
@@ -3665,6 +3732,16 @@ function animate() {
     updateInterface(delta);
     updateTargetMarker(delta);
   }
+  if (window.__cryptProfile) {
+    const info = renderer.info;
+    window.__cryptProfile.frames.push({
+      t: performance.now(),
+      calls: info.render.calls,
+      tris: info.render.triangles,
+      programs: info.programs?.length ?? 0,
+      lights: dungeonLightPool.filter((light) => light.intensity > 0).length,
+    });
+  }
   renderer.render(state.mode === 'town' ? townScene : dungeonScene, camera);
 }
 
@@ -3718,6 +3795,7 @@ async function start() {
     setLoading(1, 'Ravenrest is awake');
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
     setToast('Find Ranger Rowan by the archery yard.');
+    window.__gameReady = true;
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
@@ -3727,3 +3805,101 @@ async function start() {
 
 animate();
 start();
+
+// --- Profiling instrumentation (inert unless window.__cryptProfile is set) ---
+// Enabled by the headless CDP driver; ships no cost in normal play.
+window.__cryptProfile = { frames: [], zones: [], marks: [] };
+window.__cryptMark = (label) => {
+  if (window.__cryptProfile) window.__cryptProfile.marks.push({ t: performance.now(), label });
+};
+
+window.__cryptRun = (instant = false) => {
+  const p = window.__cryptProfile;
+  p.frames.length = 0;
+  p.zones.length = 0;
+  p.marks.length = 0;
+  window.__cryptDone = false;
+  const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const walkTo = async (x, z, timeoutMs = 20000) => {
+    window.__cryptWalkTarget = { x, z };
+    const start = performance.now();
+    while (performance.now() - start < timeoutMs) {
+      if (Math.hypot(player.root.position.x - x, player.root.position.z - z) < 1.2) return true;
+      await wait(50);
+    }
+    return false;
+  };
+  const run = async () => {
+    window.__cryptMark('route:start');
+    if (!instant) {
+      await walkTo(9.5, 10.8);
+      window.__cryptMark('town:at-rowan');
+      interact();
+      await wait(1400);
+    } else {
+      enterDungeon();
+      await wait(400);
+    }
+    window.__cryptMark('dungeon:entered');
+    // Entrance -> hub.
+    await walkTo(0, 20);
+    await walkTo(0, 12.5);
+    window.__cryptMark('room:hub');
+    await wait(1200); // let hub lights/shaders settle
+    // West branch: gate corridor -> gate room -> burial -> ossuary.
+    await walkTo(-11, 10);
+    await openGate(nearestClosedGate(2.4));
+    await walkTo(-26, 9);
+    window.__cryptMark('room:westGate');
+    await wait(800);
+    await walkTo(-47, 9);
+    window.__cryptMark('room:westBurial');
+    await walkTo(-47, -6);
+    window.__cryptMark('room:westOssuary');
+    await wait(800);
+    // Return to hub, cross east.
+    await walkTo(-26, 9);
+    await walkTo(-6, 10);
+    await walkTo(0, 12.5);
+    await walkTo(11, 10);
+    await openGate(nearestClosedGate(2.4));
+    await walkTo(26, 9);
+    window.__cryptMark('room:eastGate');
+    await wait(800);
+    await walkTo(47, 9);
+    window.__cryptMark('room:eastFlooded');
+    await walkTo(47, -6);
+    window.__cryptMark('room:eastReliquary');
+    window.__cryptDone = true;
+    window.__cryptWalkTarget = null;
+  };
+  return run();
+};
+
+// Auto-walk hook: when a target exists, inject movement keys toward it.
+(function patchPlayerUpdate() {
+  const originalUpdate = updatePlayer;
+  updatePlayer = function patchedUpdatePlayer(delta) {
+    const target = window.__cryptWalkTarget;
+    if (target && player && !player.dead && player.attackLock <= 0) {
+      camera.updateMatrixWorld();
+      camera.getWorldDirection(cameraForward);
+      cameraForward.y = 0;
+      if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
+      else cameraForward.normalize();
+      cameraRight.crossVectors(cameraForward, worldUp).normalize();
+      movementDirection.set(target.x - player.root.position.x, 0, target.z - player.root.position.z);
+      const distance = movementDirection.length();
+      if (distance > 0.25) {
+        movementDirection.normalize();
+        moveActorWithinMap(player, movementDirection.x * player.speed * delta * 1.15, movementDirection.z * player.speed * delta * 1.15, 0.65);
+        player.faceDirection(movementDirection);
+        player.play(['running', 'walking']);
+        state.started = true;
+        state.combatStarted = true;
+        return;
+      }
+    }
+    originalUpdate(delta);
+  };
+})();
