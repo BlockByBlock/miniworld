@@ -11,12 +11,20 @@ import {
   createSlotPool,
   waitForProfileTarget,
 } from './optimization-contracts.js';
+import {
+  cameraRelativeDirection,
+  createNavigationContext,
+  isWalkablePoint,
+  stepActorWithinMap,
+} from './movement-contracts.js';
 import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
 
 const canvas = $('#scene');
+const app = $('#app');
+const E2E_ENABLED = new URLSearchParams(window.location.search).has('e2e');
 const loadingScreen = $('#loading');
 const loadingFill = $('#loading-fill');
 const loadingLabel = $('#loading-label');
@@ -137,7 +145,9 @@ const state = {
   cameraShake: 0,
   cameraFovKick: 0,
   cameraOffset: new THREE.Vector3(),
-  exitPosition: new THREE.Vector3(0, 32.4, 0),
+  // The player uses (x, y, z) with y fixed at ground level; the southern exit
+  // is in the entrance room at z=32.4.
+  exitPosition: new THREE.Vector3(0, 0, 32.4),
   elapsed: 0,
   uiTimer: 0,
   overlayTimer: 0,
@@ -147,6 +157,8 @@ const state = {
   frameSampleFrames: 0,
   resolutionCooldown: 0,
   fastFrameSamples: 0,
+  interactionCount: 0,
+  lastInteraction: null,
 };
 
 const keys = new Set();
@@ -163,6 +175,113 @@ const combatTexts = [];
 const lootDrops = [];
 const zoneRenderGroups = new Map();
 const visibleZoneIds = new Set();
+const navigation = createNavigationContext({
+  mode: state.mode,
+  townBounds: TOWN_WORLD,
+  worldBounds: WORLD,
+  mapZones: MAP.zones,
+  corridorZoneIds: corridorZones,
+  staticColliders,
+  townStaticColliders,
+});
+const e2eState = {
+  errors: [],
+  smoke: null,
+  lastResult: null,
+  fastGateTransitions: 0,
+};
+let e2eStatus = null;
+
+function e2eSnapshot() {
+  return {
+    mode: state.mode,
+    zoneId: state.currentZoneId,
+    roomId: state.currentRoomId,
+    position: player
+      ? { x: player.root.position.x, y: player.root.position.y, z: player.root.position.z }
+      : null,
+    playerHp: state.playerHp,
+    seals: { ...state.seals },
+    archiveKey: state.archiveKey,
+    chests: state.chests.map((chest) => ({
+      id: chest.id,
+      roomId: chest.roomId,
+      kind: chest.kind,
+      opened: chest.opened,
+    })),
+    gates: state.gates.map((gate) => ({
+      corridorId: gate.corridorId,
+      open: gate.open,
+      fromRoomId: gate.fromRoomId,
+      toRoomId: gate.toRoomId,
+    })),
+    enemies: enemies.map((enemy) => ({ id: enemy.name, roomId: enemy.roomId, dead: enemy.dead })),
+    livingEnemies: countLivingEnemies(),
+    loot: lootDrops.map((drop) => ({ itemId: drop.itemId, collected: drop.collected })),
+    objectives: {
+      complete: runObjectivesComplete(),
+      title: objective.textContent,
+      detail: objectiveDetail.textContent,
+    },
+    finished: state.finished,
+    failed: state.failed,
+    interactionCount: state.interactionCount,
+    lastInteraction: state.lastInteraction,
+    windowRuntimeErrors: [...e2eState.errors],
+  };
+}
+
+function publishE2eSnapshot() {
+  if (!E2E_ENABLED || !e2eStatus) return;
+  const snapshot = e2eSnapshot();
+  const serialized = JSON.stringify(snapshot);
+  app.dataset.gameReady = String(state.loaded);
+  app.dataset.e2eSnapshot = serialized;
+  app.dataset.e2eResult = e2eState.lastResult ? JSON.stringify(e2eState.lastResult) : '';
+  app.dataset.e2eErrors = JSON.stringify(e2eState.errors);
+  e2eStatus.value = serialized;
+  e2eStatus.textContent = serialized;
+}
+
+function sampleKeyboardSmokeMovement() {
+  const smoke = e2eState.smoke;
+  if (!smoke || !player) return;
+  const position = player.root.position;
+  if (smoke.sampleMode !== state.mode) {
+    smoke.sampleMode = state.mode;
+    smoke.sample = { x: position.x, z: position.z };
+    return;
+  }
+  const dx = position.x - smoke.sample.x;
+  const dz = position.z - smoke.sample.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance > 0.0001) {
+    smoke.pathDistance += distance;
+    smoke.forwardTravel += dx * smoke.cameraForward.x + dz * smoke.cameraForward.z;
+  }
+  smoke.sample = { x: position.x, z: position.z };
+}
+
+function setE2eResult(result) {
+  e2eState.lastResult = result;
+  publishE2eSnapshot();
+}
+
+if (E2E_ENABLED) {
+  e2eStatus = document.createElement('output');
+  e2eStatus.id = 'e2e-status';
+  e2eStatus.hidden = true;
+  e2eStatus.setAttribute('aria-label', 'End-to-end test state');
+  app.append(e2eStatus);
+  window.addEventListener('error', (event) => {
+    e2eState.errors.push(event.error?.message ?? event.message ?? 'runtime error');
+    publishE2eSnapshot();
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    e2eState.errors.push(String(event.reason?.message ?? event.reason ?? 'unhandled rejection'));
+    publishE2eSnapshot();
+  });
+}
 
 let activeWorldGroup = null;
 const dungeonScene = new THREE.Scene();
@@ -1829,6 +1948,7 @@ function nearestTownNpc(maxDistance = Infinity) {
 function enterDungeon() {
   if (state.mode === 'dungeon' || !player) return;
   state.mode = 'dungeon';
+  navigation.mode = state.mode;
   state.teleporting = false;
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
   window.clearTimeout(dialogueTimeout);
@@ -1904,6 +2024,7 @@ function updateProgression() {
     gate.open && gate.fromRoomId === previousRoomId && gate.toRoomId === room.id
   ));
   if (traversedGate) {
+    if (E2E_ENABLED) e2eState.fastGateTransitions += 1;
     traversedGate.open = false;
     traversedGate.root.visible = true;
     // Keep both doorway frames in place. The room wall has a four-tile
@@ -1930,47 +2051,19 @@ function runObjectivesComplete() {
 }
 
 function isWalkable(x, z, padding = 0.55) {
-  if (state.mode === 'town') {
-    const insideTown = x >= TOWN_WORLD.minX + padding
-      && x <= TOWN_WORLD.maxX - padding
-      && z >= TOWN_WORLD.minZ + padding
-      && z <= TOWN_WORLD.maxZ - padding;
-    if (!insideTown) return false;
-    return !townStaticColliders.some((collider) => (
-      collider.root.visible
-      && x >= collider.minX - padding
-      && x <= collider.maxX + padding
-      && z >= collider.minZ - padding
-      && z <= collider.maxZ + padding
-    ));
-  }
-  const insideMap = MAP.zones.some((zone) => {
-    // Corridors overlap the room interiors by the actor clearance so their
-    // usable areas meet at each doorway instead of leaving a collision seam.
-    const clearance = corridorZones.has(zone) ? -padding : padding;
-    return x >= zone.minX + clearance
-      && x <= zone.maxX - clearance
-      && z >= zone.minZ + clearance
-      && z <= zone.maxZ - clearance;
-  });
-  if (!insideMap) return false;
-  return !staticColliders.some((collider) => (
-    collider.root.visible
-    && x >= collider.minX - padding
-    && x <= collider.maxX + padding
-    && z >= collider.minZ - padding
-    && z <= collider.maxZ + padding
-  ));
+  navigation.mode = state.mode;
+  return isWalkablePoint({ x, z, padding, navigation });
 }
 
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
-  const currentX = actor.root.position.x;
-  const currentZ = actor.root.position.z;
-  const bounds = state.mode === 'town' ? TOWN_WORLD : WORLD;
-  const nextX = THREE.MathUtils.clamp(currentX + offsetX, bounds.minX + padding, bounds.maxX - padding);
-  const nextZ = THREE.MathUtils.clamp(currentZ + offsetZ, bounds.minZ + padding, bounds.maxZ - padding);
-  if (isWalkable(nextX, currentZ, padding)) actor.root.position.x = nextX;
-  if (isWalkable(actor.root.position.x, nextZ, padding)) actor.root.position.z = nextZ;
+  stepActorWithinMap(
+    actor.root.position,
+    offsetX,
+    offsetZ,
+    state.mode === 'town' ? navigation.townBounds : navigation.worldBounds,
+    isWalkable,
+    padding,
+  );
 }
 
 function actorFromObject(object) {
@@ -2463,6 +2556,7 @@ function updateInterface(delta, force = false) {
   updateTargetUi();
   updateQuestUi();
   updateInteractionUi();
+  publishE2eSnapshot();
 }
 
 // Burst particles share one frozen geometry and draw from a ring buffer of
@@ -3094,10 +3188,8 @@ function updatePlayer(delta) {
       if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
       else cameraForward.normalize();
       cameraRight.crossVectors(cameraForward, worldUp).normalize();
-      movementDirection
-        .addScaledVector(cameraForward, forwardInput)
-        .addScaledVector(cameraRight, strafeInput)
-        .normalize();
+      const cameraRelative = cameraRelativeDirection(cameraForward, cameraRight, forwardInput, strafeInput);
+      movementDirection.set(cameraRelative.x, 0, cameraRelative.z);
       const speed = player.speed * (state.playerBuffTimer > 0 ? 1.25 : 1);
       moveActorWithinMap(player, movementDirection.x * speed * delta, movementDirection.z * speed * delta, 0.65);
       player.faceDirection(movementDirection);
@@ -3110,6 +3202,7 @@ function updatePlayer(delta) {
       player.play(['idle']);
     }
   }
+  sampleKeyboardSmokeMovement();
 }
 
 function updateWeaponState(delta) {
@@ -3571,22 +3664,42 @@ function openChest(chest) {
 function interact() {
   if (!state.loaded || state.finished || state.failed) return;
   if (state.mode === 'town') {
-    talkToTownNpc(nearestTownNpc(2.45));
+    const nearbyNpc = nearestTownNpc(2.45);
+    if (nearbyNpc && !state.teleporting) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'npc', id: nearbyNpc.name };
+      if (e2eState.smoke) e2eState.smoke.interaction = state.lastInteraction;
+    }
+    talkToTownNpc(nearbyNpc);
     return;
   }
   state.started = true;
   const nearbyLoot = nearestLootDrop(1.9);
   if (nearbyLoot) {
     collectLootDrop(nearbyLoot);
+    if (nearbyLoot.collected) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'loot', itemId: nearbyLoot.itemId };
+    }
     return;
   }
   const nearbyChest = nearestClosedChest(2.1);
   if (nearbyChest) {
     openChest(nearbyChest);
+    if (nearbyChest.opened) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'chest', id: nearbyChest.id };
+    }
     return;
   }
   const nearbyGate = nearestClosedGate(2.4);
-  if (nearbyGate) openGate(nearbyGate);
+  if (nearbyGate) {
+    openGate(nearbyGate);
+    if (nearbyGate.open) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'gate', id: nearbyGate.corridorId };
+    }
+  }
 }
 
 function finishRun(success) {
@@ -3788,6 +3901,7 @@ async function start() {
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
     setToast('Find Ranger Rowan by the archery yard.');
     window.__gameReady = true;
+    publishE2eSnapshot();
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
@@ -3920,3 +4034,197 @@ window.__cryptRun = async (instant = false) => {
     originalUpdate(delta);
   };
 })();
+
+// --- Fast functional-checkpoint surface (opt in through ?e2e) ---
+// Not a performance instrument: it bypasses animation time. Use __cryptRun
+// for any timing/frame measurement.
+if (E2E_ENABLED) {
+  const placeAt = (x, z) => {
+    if (!player) throw new Error('World not built yet.');
+    player.root.position.x = x;
+    player.root.position.z = z;
+    updateProgression();
+    publishE2eSnapshot();
+  };
+  const clearAllEnemies = () => {
+    for (const enemy of enemies) {
+      enemy.dead = true;
+      enemy.root.visible = false;
+    }
+  };
+  const openFastGate = (corridorId) => {
+    const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+    if (!gate) throw new Error(`No gate for ${corridorId}.`);
+    openGate(gate);
+    if (!gate.open) throw new Error(`Fast route could not open ${corridorId}.`);
+  };
+  const interactChestAt = (id, x, z) => {
+    placeAt(x, z);
+    const chest = chestById(id);
+    if (!chest) throw new Error(`Fast route has no chest for ${id}.`);
+    interact();
+    if (!chest.opened) throw new Error(`Fast route could not open ${id}.`);
+  };
+  const runFastCheckpoint = async () => {
+    const startedAt = performance.now();
+    e2eState.fastGateTransitions = 0;
+    try {
+      enterDungeon();
+      state.started = true;
+      clearAllEnemies();
+      createLootVisual('healingDraft', player.root.position);
+      interact();
+
+      placeAt(0, 26.8);
+      openFastGate('entry-corridor');
+      placeAt(0, 12);
+      interactChestAt('hub-cache', 0, 14.2);
+
+      openFastGate('west-corridor');
+      placeAt(-26, 9);
+      openFastGate('west-deep-corridor');
+      placeAt(-47, 9);
+      interactChestAt('ashen-cache', -47, 10);
+      openFastGate('west-drop');
+      interactChestAt('west-seal', -47, -13);
+
+      placeAt(0, 12);
+      openFastGate('east-corridor');
+      placeAt(26, 9);
+      openFastGate('east-deep-corridor');
+      placeAt(47, 9);
+      interactChestAt('drowned-cache', 47, 10);
+      openFastGate('east-drop');
+      interactChestAt('east-seal', 47, -12.5);
+
+      placeAt(0, 12);
+      openFastGate('north-corridor');
+      placeAt(0, -10);
+      openFastGate('archive-corridor');
+      placeAt(0, -24);
+      interactChestAt('archive-key', 0, -27);
+      openFastGate('warden-corridor');
+      placeAt(0, -42);
+      interactChestAt('warden-spoils', 0, -47.5);
+      // Use the real southern exit and let the animation loop invoke the
+      // production completion condition after objectives are complete.
+      placeAt(0, 32.4);
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      const snapshot = e2eSnapshot();
+      const requiredChestIds = ['west-seal', 'east-seal', 'archive-key', 'warden-spoils'];
+      const assertions = {
+        finished: snapshot.finished && !snapshot.failed,
+        seals: snapshot.seals.west && snapshot.seals.east,
+        archiveKey: snapshot.archiveKey,
+        requiredChests: requiredChestIds.every((id) => snapshot.chests.find((chest) => chest.id === id)?.opened),
+        lootCollected: snapshot.loot.some((drop) => drop.collected),
+        interacted: snapshot.interactionCount >= requiredChestIds.length + 4,
+        gateTraversal: e2eState.fastGateTransitions === state.gates.length,
+        objectives: snapshot.objectives.complete,
+      };
+      setE2eResult({
+        kind: 'fast-functional-checkpoint',
+        pass: Object.values(assertions).every(Boolean),
+        durationMs: Math.round(performance.now() - startedAt),
+        assertions,
+        snapshot,
+      });
+    } catch (error) {
+      setE2eResult({
+        kind: 'fast-functional-checkpoint',
+        pass: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        error: error instanceof Error ? error.message : String(error),
+        snapshot: e2eSnapshot(),
+      });
+    }
+  };
+  const startKeyboardSmoke = () => {
+    const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
+    if (rowan) player.root.position.copy(rowan.root.position);
+    state.lastInteraction = null;
+    camera.getWorldDirection(cameraForward);
+    cameraForward.y = 0;
+    cameraForward.normalize();
+    e2eState.smoke = {
+      startedAt: performance.now(),
+      cameraForward: { x: cameraForward.x, z: cameraForward.z },
+      interactionBefore: state.interactionCount,
+      errorsBefore: e2eState.errors.length,
+      sampleMode: state.mode,
+      sample: { x: player.root.position.x, z: player.root.position.z },
+      pathDistance: 0,
+      forwardTravel: 0,
+      interaction: null,
+    };
+    setE2eResult(null);
+  };
+  const finishKeyboardSmoke = () => {
+    const smoke = e2eState.smoke;
+    if (!smoke) {
+      setE2eResult({ kind: 'keyboard-smoke', pass: false, error: 'Smoke was not started.' });
+      return;
+    }
+    const distance = smoke.pathDistance;
+    const forwardDot = distance > 0.001 ? smoke.forwardTravel / distance : 0;
+    const assertions = {
+      cameraRelativeW: distance > 0.1 && forwardDot > 0.55,
+      interacted: state.interactionCount > smoke.interactionBefore && smoke.interaction?.kind === 'npc',
+      windowRuntimeErrors: e2eState.errors.length === smoke.errorsBefore,
+    };
+    setE2eResult({
+      kind: 'keyboard-smoke',
+      pass: Object.values(assertions).every(Boolean),
+      durationMs: Math.round(performance.now() - smoke.startedAt),
+      assertions,
+      errorSources: ['window.error', 'unhandledrejection'],
+      movement: { distance, forwardDot },
+      snapshot: e2eSnapshot(),
+    });
+  };
+
+  const controls = document.createElement('section');
+  controls.id = 'e2e-controls';
+  controls.setAttribute('aria-label', 'Browser validation controls');
+  controls.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;display:flex;gap:4px;';
+  const addCommand = (command, label, handler) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.e2eCommand = command;
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      try {
+        handler();
+      } catch (error) {
+        setE2eResult({ kind: command, pass: false, error: error instanceof Error ? error.message : String(error), snapshot: e2eSnapshot() });
+      }
+      publishE2eSnapshot();
+    });
+    controls.append(button);
+  };
+  addCommand('smoke-start', 'Start keyboard smoke', startKeyboardSmoke);
+  addCommand('smoke-finish', 'Finish keyboard smoke', finishKeyboardSmoke);
+  addCommand('fast-checkpoint', 'Run fast checkpoint', runFastCheckpoint);
+  app.append(controls);
+
+  window.__cryptTest = {
+    snapshot: e2eSnapshot,
+    enterDungeon,
+    placeAt,
+    clearRoom() {
+      if (!player) throw new Error('World not built yet.');
+      for (const enemy of enemies) {
+        if (enemy.roomId !== state.currentRoomId) continue;
+        enemy.dead = true;
+        enemy.root.visible = false;
+      }
+    },
+    openGateById(corridorId) {
+      const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+      if (!gate) throw new Error(`No gate for ${corridorId}.`);
+      openGate(gate);
+      return gate.open;
+    },
+  };
+}
