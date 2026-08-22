@@ -5,12 +5,26 @@ import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
+import {
+  collectDungeonLightRecipes,
+  createCryptProfile,
+  createSlotPool,
+  waitForProfileTarget,
+} from './optimization-contracts.js';
+import {
+  cameraRelativeDirection,
+  createNavigationContext,
+  isWalkablePoint,
+  stepActorWithinMap,
+} from './movement-contracts.js';
 import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
 
 const canvas = $('#scene');
+const app = $('#app');
+const E2E_ENABLED = new URLSearchParams(window.location.search).has('e2e');
 const loadingScreen = $('#loading');
 const loadingFill = $('#loading-fill');
 const loadingLabel = $('#loading-label');
@@ -131,7 +145,9 @@ const state = {
   cameraShake: 0,
   cameraFovKick: 0,
   cameraOffset: new THREE.Vector3(),
-  exitPosition: new THREE.Vector3(0, 32.4, 0),
+  // The player uses (x, y, z) with y fixed at ground level; the southern exit
+  // is in the entrance room at z=32.4.
+  exitPosition: new THREE.Vector3(0, 0, 32.4),
   elapsed: 0,
   uiTimer: 0,
   overlayTimer: 0,
@@ -141,6 +157,8 @@ const state = {
   frameSampleFrames: 0,
   resolutionCooldown: 0,
   fastFrameSamples: 0,
+  interactionCount: 0,
+  lastInteraction: null,
 };
 
 const keys = new Set();
@@ -157,9 +175,115 @@ const combatTexts = [];
 const lootDrops = [];
 const zoneRenderGroups = new Map();
 const visibleZoneIds = new Set();
+const navigation = createNavigationContext({
+  mode: state.mode,
+  townBounds: TOWN_WORLD,
+  worldBounds: WORLD,
+  mapZones: MAP.zones,
+  corridorZoneIds: corridorZones,
+  staticColliders,
+  townStaticColliders,
+});
+const e2eState = {
+  errors: [],
+  smoke: null,
+  lastResult: null,
+  fastGateTransitions: 0,
+};
+let e2eStatus = null;
+
+function e2eSnapshot() {
+  return {
+    mode: state.mode,
+    zoneId: state.currentZoneId,
+    roomId: state.currentRoomId,
+    position: player
+      ? { x: player.root.position.x, y: player.root.position.y, z: player.root.position.z }
+      : null,
+    playerHp: state.playerHp,
+    seals: { ...state.seals },
+    archiveKey: state.archiveKey,
+    chests: state.chests.map((chest) => ({
+      id: chest.id,
+      roomId: chest.roomId,
+      kind: chest.kind,
+      opened: chest.opened,
+    })),
+    gates: state.gates.map((gate) => ({
+      corridorId: gate.corridorId,
+      open: gate.open,
+      fromRoomId: gate.fromRoomId,
+      toRoomId: gate.toRoomId,
+    })),
+    enemies: enemies.map((enemy) => ({ id: enemy.name, roomId: enemy.roomId, dead: enemy.dead })),
+    livingEnemies: countLivingEnemies(),
+    loot: lootDrops.map((drop) => ({ itemId: drop.itemId, collected: drop.collected })),
+    objectives: {
+      complete: runObjectivesComplete(),
+      title: objective.textContent,
+      detail: objectiveDetail.textContent,
+    },
+    finished: state.finished,
+    failed: state.failed,
+    interactionCount: state.interactionCount,
+    lastInteraction: state.lastInteraction,
+    windowRuntimeErrors: [...e2eState.errors],
+  };
+}
+
+function publishE2eSnapshot() {
+  if (!E2E_ENABLED || !e2eStatus) return;
+  const snapshot = e2eSnapshot();
+  const serialized = JSON.stringify(snapshot);
+  app.dataset.gameReady = String(state.loaded);
+  app.dataset.e2eSnapshot = serialized;
+  app.dataset.e2eResult = e2eState.lastResult ? JSON.stringify(e2eState.lastResult) : '';
+  app.dataset.e2eErrors = JSON.stringify(e2eState.errors);
+  e2eStatus.value = serialized;
+  e2eStatus.textContent = serialized;
+}
+
+function sampleKeyboardSmokeMovement() {
+  const smoke = e2eState.smoke;
+  if (!smoke || !player) return;
+  const position = player.root.position;
+  if (smoke.sampleMode !== state.mode) {
+    smoke.sampleMode = state.mode;
+    smoke.sample = { x: position.x, z: position.z };
+    return;
+  }
+  const dx = position.x - smoke.sample.x;
+  const dz = position.z - smoke.sample.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance > 0.0001) {
+    smoke.pathDistance += distance;
+    smoke.forwardTravel += dx * smoke.cameraForward.x + dz * smoke.cameraForward.z;
+  }
+  smoke.sample = { x: position.x, z: position.z };
+}
+
+function setE2eResult(result) {
+  e2eState.lastResult = result;
+  publishE2eSnapshot();
+}
+
+if (E2E_ENABLED) {
+  e2eStatus = document.createElement('output');
+  e2eStatus.id = 'e2e-status';
+  e2eStatus.hidden = true;
+  e2eStatus.setAttribute('aria-label', 'End-to-end test state');
+  app.append(e2eStatus);
+  window.addEventListener('error', (event) => {
+    e2eState.errors.push(event.error?.message ?? event.message ?? 'runtime error');
+    publishE2eSnapshot();
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    e2eState.errors.push(String(event.reason?.message ?? event.reason ?? 'unhandled rejection'));
+    publishE2eSnapshot();
+  });
+}
 
 let activeWorldGroup = null;
-
 const dungeonScene = new THREE.Scene();
 const townScene = new THREE.Scene();
 const scene = dungeonScene;
@@ -802,10 +926,45 @@ function addBox({
   return mesh;
 }
 
-function addPointLight(x, z, color = 0xffbd74, intensity = 2.4) {
-  const light = new THREE.PointLight(color, intensity, 7, 2);
-  light.position.set(x, 2.2, z);
-  addWorldObject(light);
+// Point-light pool: the dungeon uses a fixed set of always-visible lights whose
+// positions/colors/intensities are re-applied per zone view. Keeping the visible
+// light count constant avoids shader program recompilation hitches when rooms
+// toggle visibility.
+const DUNGEON_LIGHT_POOL_SIZE = 5;
+
+let dungeonLightPool = [];
+const dungeonZoneLights = new Map();
+
+function recordZoneLight(zoneId, { x, z, color = 0xffbd74, intensity = 2.4 }) {
+  if (!dungeonZoneLights.has(zoneId)) dungeonZoneLights.set(zoneId, []);
+  dungeonZoneLights.get(zoneId).push({ x, z, color, intensity });
+}
+
+function applyDungeonLights() {
+  const recipes = collectDungeonLightRecipes(visibleZoneIds, dungeonZoneLights, DUNGEON_LIGHT_POOL_SIZE);
+  for (let index = 0; index < dungeonLightPool.length; index += 1) {
+    const light = dungeonLightPool[index];
+    const recipe = recipes[index];
+    if (!recipe) {
+      // Lights stay in the scene and "on" at all times; unused slots drop to
+      // zero intensity so the shader's light count never changes.
+      light.position.set(0, -50, 0);
+      light.intensity = 0;
+      continue;
+    }
+    light.color.set(recipe.color);
+    light.intensity = recipe.intensity;
+    light.position.set(recipe.x, 2.2, recipe.z);
+  }
+}
+
+function buildDungeonLightPool() {
+  for (let index = 0; index < DUNGEON_LIGHT_POOL_SIZE; index += 1) {
+    const light = new THREE.PointLight(0xffbd74, 0, 7, 2);
+    light.position.set(0, -50, 0);
+    dungeonScene.add(light);
+    dungeonLightPool.push(light);
+  }
 }
 
 function buildLighting() {
@@ -1085,7 +1244,7 @@ function addWallTorch(room, wall, along) {
 
 function addRoomLight(room, color, intensity = 1.35) {
   const center = roomCenter(room);
-  addPointLight(center.x, center.z, color, intensity);
+  recordZoneLight(room.id, { x: center.x, z: center.z, color, intensity });
 }
 
 function decorateRoom(room) {
@@ -1114,9 +1273,9 @@ function decorateRoom(room) {
     addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
     addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
     addRoomLight(room, 0xffa767, 1.75);
-    addPointLight(-6.1, 4.25);
-    addPointLight(6.1, 4.25, 0xffa767, 2.6);
-    addPointLight(0, -4.75, 0x8e9aff, 2.2);
+    recordZoneLight('hub', { x: -6.1, z: 4.25 });
+    recordZoneLight('hub', { x: 6.1, z: 4.25, color: 0xffa767, intensity: 2.6 });
+    recordZoneLight('hub', { x: 0, z: -4.75, color: 0x8e9aff, intensity: 2.2 });
   } else if (room.id === 'westGate') {
     for (const x of [-30, -26, -22]) {
       addTomb(x, 4.4, Math.PI / 2, 0.82);
@@ -1691,6 +1850,7 @@ function buildTown() {
 }
 
 function buildWorld() {
+  buildDungeonLightPool();
   buildLighting();
   buildCrypt();
   buildChests();
@@ -1747,6 +1907,9 @@ function updateZoneVisibility(roomId, force = false) {
   zoneRenderGroups.forEach((group, id) => {
     group.visible = visibleZoneIds.has(id);
   });
+  applyDungeonLights();
+  const profile = window.__cryptProfile;
+  if (profile?.active) profile.zones.push({ t: performance.now(), visible: [...visibleZoneIds] });
 }
 
 function showDialogue(npcName, copy, duration = 2400) {
@@ -1785,6 +1948,7 @@ function nearestTownNpc(maxDistance = Infinity) {
 function enterDungeon() {
   if (state.mode === 'dungeon' || !player) return;
   state.mode = 'dungeon';
+  navigation.mode = state.mode;
   state.teleporting = false;
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
   window.clearTimeout(dialogueTimeout);
@@ -1860,6 +2024,7 @@ function updateProgression() {
     gate.open && gate.fromRoomId === previousRoomId && gate.toRoomId === room.id
   ));
   if (traversedGate) {
+    if (E2E_ENABLED) e2eState.fastGateTransitions += 1;
     traversedGate.open = false;
     traversedGate.root.visible = true;
     // Keep both doorway frames in place. The room wall has a four-tile
@@ -1886,47 +2051,19 @@ function runObjectivesComplete() {
 }
 
 function isWalkable(x, z, padding = 0.55) {
-  if (state.mode === 'town') {
-    const insideTown = x >= TOWN_WORLD.minX + padding
-      && x <= TOWN_WORLD.maxX - padding
-      && z >= TOWN_WORLD.minZ + padding
-      && z <= TOWN_WORLD.maxZ - padding;
-    if (!insideTown) return false;
-    return !townStaticColliders.some((collider) => (
-      collider.root.visible
-      && x >= collider.minX - padding
-      && x <= collider.maxX + padding
-      && z >= collider.minZ - padding
-      && z <= collider.maxZ + padding
-    ));
-  }
-  const insideMap = MAP.zones.some((zone) => {
-    // Corridors overlap the room interiors by the actor clearance so their
-    // usable areas meet at each doorway instead of leaving a collision seam.
-    const clearance = corridorZones.has(zone) ? -padding : padding;
-    return x >= zone.minX + clearance
-      && x <= zone.maxX - clearance
-      && z >= zone.minZ + clearance
-      && z <= zone.maxZ - clearance;
-  });
-  if (!insideMap) return false;
-  return !staticColliders.some((collider) => (
-    collider.root.visible
-    && x >= collider.minX - padding
-    && x <= collider.maxX + padding
-    && z >= collider.minZ - padding
-    && z <= collider.maxZ + padding
-  ));
+  navigation.mode = state.mode;
+  return isWalkablePoint({ x, z, padding, navigation });
 }
 
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
-  const currentX = actor.root.position.x;
-  const currentZ = actor.root.position.z;
-  const bounds = state.mode === 'town' ? TOWN_WORLD : WORLD;
-  const nextX = THREE.MathUtils.clamp(currentX + offsetX, bounds.minX + padding, bounds.maxX - padding);
-  const nextZ = THREE.MathUtils.clamp(currentZ + offsetZ, bounds.minZ + padding, bounds.maxZ - padding);
-  if (isWalkable(nextX, currentZ, padding)) actor.root.position.x = nextX;
-  if (isWalkable(actor.root.position.x, nextZ, padding)) actor.root.position.z = nextZ;
+  stepActorWithinMap(
+    actor.root.position,
+    offsetX,
+    offsetZ,
+    state.mode === 'town' ? navigation.townBounds : navigation.worldBounds,
+    isWalkable,
+    padding,
+  );
 }
 
 function actorFromObject(object) {
@@ -2311,8 +2448,11 @@ function openGate(gate) {
 
 function chestBlockReason(chest) {
   if (!chest || chest.opened) return '';
-  if (chest.kind === 'seal' && livingEnemiesInBranch(chest.branch).length > 0) {
-    return `The ${chest.branch}ern seal remains warded by ${livingEnemiesInBranch(chest.branch).length} guardian${livingEnemiesInBranch(chest.branch).length === 1 ? '' : 's'}.`;
+  if (chest.kind === 'seal') {
+    const guardians = livingEnemiesInBranch(chest.branch).length;
+    if (guardians > 0) {
+      return `The ${chest.branch}ern seal remains warded by ${guardians} guardian${guardians === 1 ? '' : 's'}.`;
+    }
   }
   if (chest.kind === 'archive' && livingEnemiesInBranch('north', { includeWarden: false }).length > 0) {
     return 'The Archive cache remains sealed while its acolytes stand.';
@@ -2416,16 +2556,29 @@ function updateInterface(delta, force = false) {
   updateTargetUi();
   updateQuestUi();
   updateInteractionUi();
+  publishE2eSnapshot();
 }
 
+// Burst particles share one frozen geometry and draw from a ring buffer of
+// pooled meshes. Each particle keeps its own material so randomized lifetimes
+// can fade independently; the pool only avoids per-burst allocations.
+const BURST_POOL_SIZE = 160;
+let burstGeometry = null;
+const acquireBurstMesh = createSlotPool(BURST_POOL_SIZE, () => {
+  if (!burstGeometry) burstGeometry = new THREE.SphereGeometry(0.055, 6, 6);
+  const mesh = new THREE.Mesh(burstGeometry, new THREE.MeshBasicMaterial({ transparent: true }));
+  scene.add(mesh);
+  return mesh;
+});
+
 function spawnBurst(position, color = 0xf0c071, count = 12) {
-  const geometry = new THREE.SphereGeometry(0.055, 6, 6);
-  const material = new THREE.MeshBasicMaterial({ color, transparent: true });
   for (let index = 0; index < count; index += 1) {
-    const mesh = new THREE.Mesh(geometry, material.clone());
+    const mesh = acquireBurstMesh();
+    mesh.visible = true;
+    mesh.material.color.set(color);
+    mesh.material.opacity = 1;
     mesh.position.copy(position);
     mesh.position.y += 0.55;
-    scene.add(mesh);
     const angle = (index / count) * Math.PI * 2;
     effects.push({
       mesh,
@@ -2855,11 +3008,10 @@ function updateEffects(delta) {
     effect.life -= delta;
     effect.velocity.y -= delta * 2.8;
     effect.mesh.position.addScaledVector(effect.velocity, delta);
-    effect.mesh.material.opacity = Math.max(0, effect.life);
+    effect.mesh.material.opacity = Math.min(1, Math.max(0, effect.life));
     if (effect.life <= 0) {
-      scene.remove(effect.mesh);
-      effect.mesh.geometry.dispose();
-      effect.mesh.material.dispose();
+      // Return the mesh to the pool; geometry and material stay alive.
+      effect.mesh.visible = false;
       effects.splice(index, 1);
     }
   }
@@ -3036,10 +3188,8 @@ function updatePlayer(delta) {
       if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
       else cameraForward.normalize();
       cameraRight.crossVectors(cameraForward, worldUp).normalize();
-      movementDirection
-        .addScaledVector(cameraForward, forwardInput)
-        .addScaledVector(cameraRight, strafeInput)
-        .normalize();
+      const cameraRelative = cameraRelativeDirection(cameraForward, cameraRight, forwardInput, strafeInput);
+      movementDirection.set(cameraRelative.x, 0, cameraRelative.z);
       const speed = player.speed * (state.playerBuffTimer > 0 ? 1.25 : 1);
       moveActorWithinMap(player, movementDirection.x * speed * delta, movementDirection.z * speed * delta, 0.65);
       player.faceDirection(movementDirection);
@@ -3052,6 +3202,7 @@ function updatePlayer(delta) {
       player.play(['idle']);
     }
   }
+  sampleKeyboardSmokeMovement();
 }
 
 function updateWeaponState(delta) {
@@ -3513,22 +3664,42 @@ function openChest(chest) {
 function interact() {
   if (!state.loaded || state.finished || state.failed) return;
   if (state.mode === 'town') {
-    talkToTownNpc(nearestTownNpc(2.45));
+    const nearbyNpc = nearestTownNpc(2.45);
+    if (nearbyNpc && !state.teleporting) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'npc', id: nearbyNpc.name };
+      if (e2eState.smoke) e2eState.smoke.interaction = state.lastInteraction;
+    }
+    talkToTownNpc(nearbyNpc);
     return;
   }
   state.started = true;
   const nearbyLoot = nearestLootDrop(1.9);
   if (nearbyLoot) {
     collectLootDrop(nearbyLoot);
+    if (nearbyLoot.collected) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'loot', itemId: nearbyLoot.itemId };
+    }
     return;
   }
   const nearbyChest = nearestClosedChest(2.1);
   if (nearbyChest) {
     openChest(nearbyChest);
+    if (nearbyChest.opened) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'chest', id: nearbyChest.id };
+    }
     return;
   }
   const nearbyGate = nearestClosedGate(2.4);
-  if (nearbyGate) openGate(nearbyGate);
+  if (nearbyGate) {
+    openGate(nearbyGate);
+    if (nearbyGate.open) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'gate', id: nearbyGate.corridorId };
+    }
+  }
 }
 
 function finishRun(success) {
@@ -3665,6 +3836,17 @@ function animate() {
     updateInterface(delta);
     updateTargetMarker(delta);
   }
+  const profile = window.__cryptProfile;
+  if (profile?.active) {
+    const info = renderer.info;
+    profile.frames.push({
+      t: performance.now(),
+      calls: info.render.calls,
+      tris: info.render.triangles,
+      programs: info.programs?.length ?? 0,
+      lights: dungeonLightPool.filter((light) => light.intensity > 0).length,
+    });
+  }
   renderer.render(state.mode === 'town' ? townScene : dungeonScene, camera);
 }
 
@@ -3718,6 +3900,8 @@ async function start() {
     setLoading(1, 'Ravenrest is awake');
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
     setToast('Find Ranger Rowan by the archery yard.');
+    window.__gameReady = true;
+    publishE2eSnapshot();
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
@@ -3727,3 +3911,320 @@ async function start() {
 
 animate();
 start();
+
+// --- Profiling instrumentation (opt in through __cryptRun) ---
+window.__cryptProfile = null;
+window.__cryptDone = false;
+window.__cryptError = null;
+window.__cryptMark = (label) => {
+  const profile = window.__cryptProfile;
+  if (profile?.active) profile.marks.push({ t: performance.now(), label });
+};
+
+window.__cryptRun = async (instant = false) => {
+  const profile = window.__cryptProfile ??= createCryptProfile();
+  profile.frames.length = 0;
+  profile.zones.length = 0;
+  profile.marks.length = 0;
+  profile.active = true;
+  window.__cryptDone = false;
+  window.__cryptError = null;
+  const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const walkTo = (x, z, timeoutMs = 20000) => waitForProfileTarget({
+    x,
+    z,
+    setTarget: (target) => { window.__cryptWalkTarget = target; },
+    getPosition: () => player.root.position,
+    wait,
+    timeoutMs,
+  });
+  const clearProfileRoom = () => {
+    for (const enemy of enemies) {
+      if (enemy.roomId !== state.currentRoomId) continue;
+      enemy.dead = true;
+      enemy.root.visible = false;
+    }
+  };
+  const openProfileGate = async (corridorId) => {
+    const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+    if (!gate) throw new Error(`Profile route has no gate for ${corridorId}.`);
+    if (gate.open) return;
+    await walkTo(gate.position.x, gate.position.z);
+    clearProfileRoom();
+    openGate(gate);
+    if (!gate.open) throw new Error(`Profile route could not open ${corridorId}.`);
+    await wait(100);
+  };
+  try {
+    window.__cryptMark('route:start');
+    if (!instant) {
+      const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
+      if (!rowan) throw new Error('Profile route could not find Ranger Rowan.');
+      await walkTo(rowan.root.position.x, rowan.root.position.z);
+      window.__cryptMark('town:at-rowan');
+      talkToTownNpc(rowan);
+      await wait(1400);
+      if (state.mode !== 'dungeon') throw new Error('Profile route did not enter the dungeon.');
+    } else {
+      enterDungeon();
+      await wait(400);
+    }
+    window.__cryptMark('dungeon:entered');
+    // Entrance -> hub.
+    await openProfileGate('entry-corridor');
+    await walkTo(0, 12.5);
+    window.__cryptMark('room:hub');
+    await wait(1200); // let hub lights/shaders settle
+    // West branch: gate corridor -> gate room -> burial -> ossuary.
+    await openProfileGate('west-corridor');
+    await walkTo(-26, 9);
+    window.__cryptMark('room:westGate');
+    await wait(800);
+    await openProfileGate('west-deep-corridor');
+    await walkTo(-47, 9);
+    window.__cryptMark('room:westBurial');
+    await openProfileGate('west-drop');
+    await walkTo(-47, -6);
+    window.__cryptMark('room:westOssuary');
+    await wait(800);
+    // Return to hub, cross east.
+    await walkTo(-47, 9);
+    await openProfileGate('west-deep-corridor');
+    await walkTo(-26, 9);
+    await openProfileGate('west-corridor');
+    await walkTo(0, 12.5);
+    await openProfileGate('east-corridor');
+    await walkTo(26, 9);
+    window.__cryptMark('room:eastGate');
+    await wait(800);
+    await openProfileGate('east-deep-corridor');
+    await walkTo(47, 9);
+    window.__cryptMark('room:eastFlooded');
+    await openProfileGate('east-drop');
+    await walkTo(47, -6);
+    window.__cryptMark('room:eastReliquary');
+  } catch (error) {
+    window.__cryptError = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    profile.active = false;
+    window.__cryptDone = true;
+    window.__cryptWalkTarget = null;
+  }
+};
+
+// Auto-walk hook: when a target exists, inject movement keys toward it.
+(function patchPlayerUpdate() {
+  const originalUpdate = updatePlayer;
+  updatePlayer = function patchedUpdatePlayer(delta) {
+    const target = window.__cryptWalkTarget;
+    if (target && player && !player.dead && player.attackLock <= 0) {
+      movementDirection.set(target.x - player.root.position.x, 0, target.z - player.root.position.z);
+      const distance = movementDirection.length();
+      if (distance > 0.25) {
+        movementDirection.normalize();
+        moveActorWithinMap(player, movementDirection.x * player.speed * delta * 1.15, movementDirection.z * player.speed * delta * 1.15, 0.65);
+        player.faceDirection(movementDirection);
+        player.play(['running', 'walking']);
+        state.started = true;
+        state.combatStarted = true;
+        return;
+      }
+    }
+    originalUpdate(delta);
+  };
+})();
+
+// --- Fast functional-checkpoint surface (opt in through ?e2e) ---
+// Not a performance instrument: it bypasses animation time. Use __cryptRun
+// for any timing/frame measurement.
+if (E2E_ENABLED) {
+  const placeAt = (x, z) => {
+    if (!player) throw new Error('World not built yet.');
+    player.root.position.x = x;
+    player.root.position.z = z;
+    updateProgression();
+    publishE2eSnapshot();
+  };
+  const clearAllEnemies = () => {
+    for (const enemy of enemies) {
+      enemy.dead = true;
+      enemy.root.visible = false;
+    }
+  };
+  const openFastGate = (corridorId) => {
+    const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+    if (!gate) throw new Error(`No gate for ${corridorId}.`);
+    openGate(gate);
+    if (!gate.open) throw new Error(`Fast route could not open ${corridorId}.`);
+  };
+  const interactChestAt = (id, x, z) => {
+    placeAt(x, z);
+    const chest = chestById(id);
+    if (!chest) throw new Error(`Fast route has no chest for ${id}.`);
+    interact();
+    if (!chest.opened) throw new Error(`Fast route could not open ${id}.`);
+  };
+  const runFastCheckpoint = async () => {
+    const startedAt = performance.now();
+    e2eState.fastGateTransitions = 0;
+    try {
+      enterDungeon();
+      state.started = true;
+      clearAllEnemies();
+      createLootVisual('healingDraft', player.root.position);
+      interact();
+
+      placeAt(0, 26.8);
+      openFastGate('entry-corridor');
+      placeAt(0, 12);
+      interactChestAt('hub-cache', 0, 14.2);
+
+      openFastGate('west-corridor');
+      placeAt(-26, 9);
+      openFastGate('west-deep-corridor');
+      placeAt(-47, 9);
+      interactChestAt('ashen-cache', -47, 10);
+      openFastGate('west-drop');
+      interactChestAt('west-seal', -47, -13);
+
+      placeAt(0, 12);
+      openFastGate('east-corridor');
+      placeAt(26, 9);
+      openFastGate('east-deep-corridor');
+      placeAt(47, 9);
+      interactChestAt('drowned-cache', 47, 10);
+      openFastGate('east-drop');
+      interactChestAt('east-seal', 47, -12.5);
+
+      placeAt(0, 12);
+      openFastGate('north-corridor');
+      placeAt(0, -10);
+      openFastGate('archive-corridor');
+      placeAt(0, -24);
+      interactChestAt('archive-key', 0, -27);
+      openFastGate('warden-corridor');
+      placeAt(0, -42);
+      interactChestAt('warden-spoils', 0, -47.5);
+      // Use the real southern exit and let the animation loop invoke the
+      // production completion condition after objectives are complete.
+      placeAt(0, 32.4);
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      const snapshot = e2eSnapshot();
+      const requiredChestIds = ['west-seal', 'east-seal', 'archive-key', 'warden-spoils'];
+      const assertions = {
+        finished: snapshot.finished && !snapshot.failed,
+        seals: snapshot.seals.west && snapshot.seals.east,
+        archiveKey: snapshot.archiveKey,
+        requiredChests: requiredChestIds.every((id) => snapshot.chests.find((chest) => chest.id === id)?.opened),
+        lootCollected: snapshot.loot.some((drop) => drop.collected),
+        interacted: snapshot.interactionCount >= requiredChestIds.length + 4,
+        gateTraversal: e2eState.fastGateTransitions === state.gates.length,
+        objectives: snapshot.objectives.complete,
+      };
+      setE2eResult({
+        kind: 'fast-functional-checkpoint',
+        pass: Object.values(assertions).every(Boolean),
+        durationMs: Math.round(performance.now() - startedAt),
+        assertions,
+        snapshot,
+      });
+    } catch (error) {
+      setE2eResult({
+        kind: 'fast-functional-checkpoint',
+        pass: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        error: error instanceof Error ? error.message : String(error),
+        snapshot: e2eSnapshot(),
+      });
+    }
+  };
+  const startKeyboardSmoke = () => {
+    const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
+    if (rowan) player.root.position.copy(rowan.root.position);
+    state.lastInteraction = null;
+    camera.getWorldDirection(cameraForward);
+    cameraForward.y = 0;
+    cameraForward.normalize();
+    e2eState.smoke = {
+      startedAt: performance.now(),
+      cameraForward: { x: cameraForward.x, z: cameraForward.z },
+      interactionBefore: state.interactionCount,
+      errorsBefore: e2eState.errors.length,
+      sampleMode: state.mode,
+      sample: { x: player.root.position.x, z: player.root.position.z },
+      pathDistance: 0,
+      forwardTravel: 0,
+      interaction: null,
+    };
+    setE2eResult(null);
+  };
+  const finishKeyboardSmoke = () => {
+    const smoke = e2eState.smoke;
+    if (!smoke) {
+      setE2eResult({ kind: 'keyboard-smoke', pass: false, error: 'Smoke was not started.' });
+      return;
+    }
+    const distance = smoke.pathDistance;
+    const forwardDot = distance > 0.001 ? smoke.forwardTravel / distance : 0;
+    const assertions = {
+      cameraRelativeW: distance > 0.1 && forwardDot > 0.55,
+      interacted: state.interactionCount > smoke.interactionBefore && smoke.interaction?.kind === 'npc',
+      windowRuntimeErrors: e2eState.errors.length === smoke.errorsBefore,
+    };
+    setE2eResult({
+      kind: 'keyboard-smoke',
+      pass: Object.values(assertions).every(Boolean),
+      durationMs: Math.round(performance.now() - smoke.startedAt),
+      assertions,
+      errorSources: ['window.error', 'unhandledrejection'],
+      movement: { distance, forwardDot },
+      snapshot: e2eSnapshot(),
+    });
+  };
+
+  const controls = document.createElement('section');
+  controls.id = 'e2e-controls';
+  controls.setAttribute('aria-label', 'Browser validation controls');
+  controls.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;display:flex;gap:4px;';
+  const addCommand = (command, label, handler) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.e2eCommand = command;
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      try {
+        handler();
+      } catch (error) {
+        setE2eResult({ kind: command, pass: false, error: error instanceof Error ? error.message : String(error), snapshot: e2eSnapshot() });
+      }
+      publishE2eSnapshot();
+    });
+    controls.append(button);
+  };
+  addCommand('smoke-start', 'Start keyboard smoke', startKeyboardSmoke);
+  addCommand('smoke-finish', 'Finish keyboard smoke', finishKeyboardSmoke);
+  addCommand('fast-checkpoint', 'Run fast checkpoint', runFastCheckpoint);
+  app.append(controls);
+
+  window.__cryptTest = {
+    snapshot: e2eSnapshot,
+    enterDungeon,
+    placeAt,
+    clearRoom() {
+      if (!player) throw new Error('World not built yet.');
+      for (const enemy of enemies) {
+        if (enemy.roomId !== state.currentRoomId) continue;
+        enemy.dead = true;
+        enemy.root.visible = false;
+      }
+    },
+    openGateById(corridorId) {
+      const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+      if (!gate) throw new Error(`No gate for ${corridorId}.`);
+      openGate(gate);
+      return gate.open;
+    },
+  };
+}
