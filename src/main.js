@@ -5,6 +5,12 @@ import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
+import {
+  collectDungeonLightRecipes,
+  createCryptProfile,
+  createSlotPool,
+  waitForProfileTarget,
+} from './optimization-contracts.js';
 import { WORLD_DATA } from './world-data.js';
 import './style.css';
 
@@ -805,8 +811,7 @@ function addBox({
 // positions/colors/intensities are re-applied per zone view. Keeping the visible
 // light count constant avoids shader program recompilation hitches when rooms
 // toggle visibility.
-const DUNGEON_LIGHT_POOL_SIZE = 4;
-const DUNGEON_LIGHT_DEFAULT = { color: 0xffbd74, intensity: 2.4 };
+const DUNGEON_LIGHT_POOL_SIZE = 5;
 
 let dungeonLightPool = [];
 const dungeonZoneLights = new Map();
@@ -817,12 +822,7 @@ function recordZoneLight(zoneId, { x, z, color = 0xffbd74, intensity = 2.4 }) {
 }
 
 function applyDungeonLights() {
-  const recipes = [];
-  for (const zoneId of visibleZoneIds) {
-    for (const recipe of dungeonZoneLights.get(zoneId) ?? []) {
-      if (recipes.length < DUNGEON_LIGHT_POOL_SIZE) recipes.push(recipe);
-    }
-  }
+  const recipes = collectDungeonLightRecipes(visibleZoneIds, dungeonZoneLights, DUNGEON_LIGHT_POOL_SIZE);
   for (let index = 0; index < dungeonLightPool.length; index += 1) {
     const light = dungeonLightPool[index];
     const recipe = recipes[index];
@@ -841,7 +841,7 @@ function applyDungeonLights() {
 
 function buildDungeonLightPool() {
   for (let index = 0; index < DUNGEON_LIGHT_POOL_SIZE; index += 1) {
-    const light = new THREE.PointLight(DUNGEON_LIGHT_DEFAULT.color, 0, 7, 2);
+    const light = new THREE.PointLight(0xffbd74, 0, 7, 2);
     light.position.set(0, -50, 0);
     dungeonScene.add(light);
     dungeonLightPool.push(light);
@@ -1789,7 +1789,8 @@ function updateZoneVisibility(roomId, force = false) {
     group.visible = visibleZoneIds.has(id);
   });
   applyDungeonLights();
-  if (window.__cryptProfile) window.__cryptProfile.zones.push({ t: performance.now(), visible: [...visibleZoneIds] });
+  const profile = window.__cryptProfile;
+  if (profile?.active) profile.zones.push({ t: performance.now(), visible: [...visibleZoneIds] });
 }
 
 function showDialogue(npcName, copy, duration = 2400) {
@@ -2469,27 +2470,17 @@ function updateInterface(delta, force = false) {
 // can fade independently; the pool only avoids per-burst allocations.
 const BURST_POOL_SIZE = 160;
 let burstGeometry = null;
-const burstPool = [];
-let burstCursor = 0;
-
-function acquireBurstMesh() {
+const acquireBurstMesh = createSlotPool(BURST_POOL_SIZE, () => {
   if (!burstGeometry) burstGeometry = new THREE.SphereGeometry(0.055, 6, 6);
-  let entry = burstPool[burstCursor];
-  if (!entry) {
-    const mesh = new THREE.Mesh(burstGeometry, new THREE.MeshBasicMaterial({ transparent: true }));
-    entry = { mesh };
-    burstPool.push(entry);
-  }
-  const mesh = entry.mesh;
-  if (!mesh.parent) scene.add(mesh);
-  mesh.visible = true;
-  burstCursor = (burstCursor + 1) % BURST_POOL_SIZE;
+  const mesh = new THREE.Mesh(burstGeometry, new THREE.MeshBasicMaterial({ transparent: true }));
+  scene.add(mesh);
   return mesh;
-}
+});
 
 function spawnBurst(position, color = 0xf0c071, count = 12) {
   for (let index = 0; index < count; index += 1) {
     const mesh = acquireBurstMesh();
+    mesh.visible = true;
     mesh.material.color.set(color);
     mesh.material.opacity = 1;
     mesh.position.copy(position);
@@ -3732,9 +3723,10 @@ function animate() {
     updateInterface(delta);
     updateTargetMarker(delta);
   }
-  if (window.__cryptProfile) {
+  const profile = window.__cryptProfile;
+  if (profile?.active) {
     const info = renderer.info;
-    window.__cryptProfile.frames.push({
+    profile.frames.push({
       t: performance.now(),
       calls: info.render.calls,
       tris: info.render.triangles,
@@ -3806,74 +3798,105 @@ async function start() {
 animate();
 start();
 
-// --- Profiling instrumentation (inert unless window.__cryptProfile is set) ---
-// Enabled by the headless CDP driver; ships no cost in normal play.
-window.__cryptProfile = { frames: [], zones: [], marks: [] };
+// --- Profiling instrumentation (opt in through __cryptRun) ---
+window.__cryptProfile = null;
+window.__cryptDone = false;
+window.__cryptError = null;
 window.__cryptMark = (label) => {
-  if (window.__cryptProfile) window.__cryptProfile.marks.push({ t: performance.now(), label });
+  const profile = window.__cryptProfile;
+  if (profile?.active) profile.marks.push({ t: performance.now(), label });
 };
 
-window.__cryptRun = (instant = false) => {
-  const p = window.__cryptProfile;
-  p.frames.length = 0;
-  p.zones.length = 0;
-  p.marks.length = 0;
+window.__cryptRun = async (instant = false) => {
+  const profile = window.__cryptProfile ??= createCryptProfile();
+  profile.frames.length = 0;
+  profile.zones.length = 0;
+  profile.marks.length = 0;
+  profile.active = true;
   window.__cryptDone = false;
+  window.__cryptError = null;
   const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
-  const walkTo = async (x, z, timeoutMs = 20000) => {
-    window.__cryptWalkTarget = { x, z };
-    const start = performance.now();
-    while (performance.now() - start < timeoutMs) {
-      if (Math.hypot(player.root.position.x - x, player.root.position.z - z) < 1.2) return true;
-      await wait(50);
+  const walkTo = (x, z, timeoutMs = 20000) => waitForProfileTarget({
+    x,
+    z,
+    setTarget: (target) => { window.__cryptWalkTarget = target; },
+    getPosition: () => player.root.position,
+    wait,
+    timeoutMs,
+  });
+  const clearProfileRoom = () => {
+    for (const enemy of enemies) {
+      if (enemy.roomId !== state.currentRoomId) continue;
+      enemy.dead = true;
+      enemy.root.visible = false;
     }
-    return false;
   };
-  const run = async () => {
+  const openProfileGate = async (corridorId) => {
+    const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+    if (!gate) throw new Error(`Profile route has no gate for ${corridorId}.`);
+    if (gate.open) return;
+    await walkTo(gate.position.x, gate.position.z);
+    clearProfileRoom();
+    openGate(gate);
+    if (!gate.open) throw new Error(`Profile route could not open ${corridorId}.`);
+    await wait(100);
+  };
+  try {
     window.__cryptMark('route:start');
     if (!instant) {
-      await walkTo(9.5, 10.8);
+      const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
+      if (!rowan) throw new Error('Profile route could not find Ranger Rowan.');
+      await walkTo(rowan.root.position.x, rowan.root.position.z);
       window.__cryptMark('town:at-rowan');
-      interact();
+      talkToTownNpc(rowan);
       await wait(1400);
+      if (state.mode !== 'dungeon') throw new Error('Profile route did not enter the dungeon.');
     } else {
       enterDungeon();
       await wait(400);
     }
     window.__cryptMark('dungeon:entered');
     // Entrance -> hub.
-    await walkTo(0, 20);
+    await openProfileGate('entry-corridor');
     await walkTo(0, 12.5);
     window.__cryptMark('room:hub');
     await wait(1200); // let hub lights/shaders settle
     // West branch: gate corridor -> gate room -> burial -> ossuary.
-    await walkTo(-11, 10);
-    await openGate(nearestClosedGate(2.4));
+    await openProfileGate('west-corridor');
     await walkTo(-26, 9);
     window.__cryptMark('room:westGate');
     await wait(800);
+    await openProfileGate('west-deep-corridor');
     await walkTo(-47, 9);
     window.__cryptMark('room:westBurial');
+    await openProfileGate('west-drop');
     await walkTo(-47, -6);
     window.__cryptMark('room:westOssuary');
     await wait(800);
     // Return to hub, cross east.
+    await walkTo(-47, 9);
+    await openProfileGate('west-deep-corridor');
     await walkTo(-26, 9);
-    await walkTo(-6, 10);
+    await openProfileGate('west-corridor');
     await walkTo(0, 12.5);
-    await walkTo(11, 10);
-    await openGate(nearestClosedGate(2.4));
+    await openProfileGate('east-corridor');
     await walkTo(26, 9);
     window.__cryptMark('room:eastGate');
     await wait(800);
+    await openProfileGate('east-deep-corridor');
     await walkTo(47, 9);
     window.__cryptMark('room:eastFlooded');
+    await openProfileGate('east-drop');
     await walkTo(47, -6);
     window.__cryptMark('room:eastReliquary');
+  } catch (error) {
+    window.__cryptError = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    profile.active = false;
     window.__cryptDone = true;
     window.__cryptWalkTarget = null;
-  };
-  return run();
+  }
 };
 
 // Auto-walk hook: when a target exists, inject movement keys toward it.
@@ -3882,12 +3905,6 @@ window.__cryptRun = (instant = false) => {
   updatePlayer = function patchedUpdatePlayer(delta) {
     const target = window.__cryptWalkTarget;
     if (target && player && !player.dead && player.attackLock <= 0) {
-      camera.updateMatrixWorld();
-      camera.getWorldDirection(cameraForward);
-      cameraForward.y = 0;
-      if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
-      else cameraForward.normalize();
-      cameraRight.crossVectors(cameraForward, worldUp).normalize();
       movementDirection.set(target.x - player.root.position.x, 0, target.z - player.root.position.z);
       const distance = movementDirection.length();
       if (distance > 0.25) {

@@ -203,6 +203,36 @@ bottlenecks into implementation work.
 5. **Leave static merging optional.** Revisit it only if draw calls again become
    the measured limiter after the lower-risk work.
 
+## Review-fix execution — 2026-08-22
+
+The implementation checkpoint was committed and pushed in PR #6 before this
+follow-up pass. The review findings were addressed in this follow-up pass:
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| Profiling allocated and recorded during normal play | Profile state now starts as `null`; recording is active only inside `__cryptRun()` and is disabled in `finally`. Route failures set `__cryptError` and still set `__cryptDone`. | `tests/optimization-contracts.test.mjs`, `node --check src/main.js` |
+| Scripted route targeted the wrong town NPC and ignored failed steps | Route resolves Ranger Rowan by role, uses the actual corridor IDs, opens each gate through the real progression path, and rejects unreachable targets instead of continuing. | `waitForProfileTarget` contract test; browser profile still pending |
+| Four-light pool dropped the fifth visible recipe | Pool capacity is five, matching the hub's four lights plus one adjacent room; the collector rejects future overflow instead of truncating it. | five-light capacity contract test |
+| Ponytail complexity findings | Removed unused camera-direction work, replaced the nested route/ignored-success flow with small checked helpers, inlined the one-use light default, and kept pooled slot reuse in one ring-order helper. | `git diff --check`; focused helper tests |
+
+The follow-up adds `src/optimization-contracts.js` and
+`tests/optimization-contracts.test.mjs`; it does not change gameplay constants,
+world content, or visual styling. The checkpoint performance table above is
+historic: it was captured before the route correction and must not be used as
+fresh evidence until a browser run completes successfully.
+
+### Follow-up verification
+
+- `npm test`: 19/19 passing.
+- `node --test tests/optimization-contracts.test.mjs`: 4/4 passing.
+- `node --check src/main.js`: passing.
+- `git diff --check`: passing.
+- `npm run build`: passing; generated JS is 798.83 KB (218.57 KB gzip), with
+  the existing chunk-size warning.
+- Preview smoke check: the loading screen settled and no console errors were
+  reported. A full benchmark profile remains pending because the old ephemeral
+  CDP driver is not present in the workspace.
+
 
 ## Follow-up verification — 2026-08-22
 
@@ -231,7 +261,7 @@ acting on any of them. Results:
   colliders kept in a small dynamic list consulted alongside the index;
   old-vs-new sampled equivalence assert during development.
 
-### Current state
+### Current state at the review checkpoint
 
 1. Tests restored (15/15 passing), build green — safety net in place.
 2. Next step remains the follow-up's step 2: capture a reproducible browser
