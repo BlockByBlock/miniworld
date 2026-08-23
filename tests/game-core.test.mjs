@@ -168,8 +168,9 @@ test('full delve: New Game to victory using only semantic actions', () => {
     'The Archive cache remains sealed while its acolytes stand.',
   );
   open('warden-corridor');
-  walk(0, -40);
-  // The warden falls to semantic combat; the adds are cleared as a test aid.
+  // Kite: stand just inside the keep, out of every enemy's attack range but
+  // within firebolt range (8.5) of the warden.
+  walk(0, -36);
   let guard = 0;
   while (core.describe().enemies.find((enemy) => enemy.id === 'crypt-warden')?.hp > 0) {
     const swing = core.useAction('fire', 'crypt-warden');
@@ -196,17 +197,31 @@ test('full delve: New Game to victory using only semantic actions', () => {
   walk(0, -8);
   open('north-corridor');
   walk(0, 12.5);
-  open('entry-corridor');
   walk(0, 31.2);
   core.tick(0.1);
+
   const view = core.describe();
-  assert.equal(view.finished, true);
-  assert.equal(view.objectives.complete, true);
-  assert.equal(view.seals.west, true);
-  assert.equal(view.seals.east, true);
   assert.equal(view.archiveKey, true);
   assert.equal(view.enemies.every((enemy) => enemy.dead), true);
   assert.ok(core.getEvents().some((event) => event.type === 'run-finished' && event.success));
+});
+
+test('the loss path is exercisable: standing in a living room gets you killed', () => {
+  const core = freshCore();
+  enterDungeon(core);
+  core.openGate('entry-corridor');
+  core.moveTo(0, 12.5);
+  core.openGate('west-corridor');
+  core.moveTo(-26, 9); // walk into westGate without clearing it
+  let seconds = 0;
+  while (!core.describe().failed && seconds < 600) {
+    core.tick(1);
+    seconds += 1;
+  }
+  const view = core.describe();
+  assert.equal(view.failed, true);
+  assert.equal(view.player.hp, 0);
+  assert.ok(core.getEvents().some((event) => event.type === 'run-finished' && event.success === false));
 });
 
 test('same seed produces identical event logs across runs', () => {

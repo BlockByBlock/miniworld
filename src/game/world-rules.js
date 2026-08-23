@@ -85,6 +85,27 @@ export function lootItemForProfile(profileKey) {
   return 'healingDraft';
 }
 
+// --- World geometry -------------------------------------------------------
+
+// Geometric zone adjacency used at build time by the rendered game and on
+// every run by the headless core. Zones are neighbors when their bounds
+// overlap on both axes past a small epsilon.
+export function computeZoneNeighbors(zones) {
+  return new Map(zones.map((zone) => {
+    const neighbors = zones
+      .filter((candidate) => candidate !== zone)
+      .filter((candidate) => {
+        const overlapX = Math.min(zone.maxX, candidate.maxX) - Math.max(zone.minX, candidate.minX);
+        const overlapZ = Math.min(zone.maxZ, candidate.maxZ) - Math.max(zone.minZ, candidate.minZ);
+        return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
+      })
+      .map((candidate) => candidate.id);
+    return [zone.id, neighbors];
+  }));
+}
+
+ // --- Run objectives / win condition --------------------------------------
+
 export function playerDamage(baseDamage, { buffed = false, itemMultiplier = 1 } = {}) {
   return Math.round(baseDamage * (buffed ? 1.4 : 1) * itemMultiplier);
 }

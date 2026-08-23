@@ -96,10 +96,12 @@ open('archive-corridor');
 walk(0, -27);
 core.clearRoom('northLibrary');
 
-// The warden falls to semantic combat. The archive cache stays sealed
-// until the whole north branch is silent, so the key is collected after.
+// The warden falls to semantic combat. The agent kites from the keep door:
+// out of every enemy's attack range, within firebolt range. The archive
+// cache stays sealed until the whole north branch is silent, so the key is
+// collected after.
 open('warden-corridor');
-walk(0, -40);
+walk(0, -36);
 let swings = 0;
 while ((core.describe().enemies.find((enemy) => enemy.id === 'crypt-warden')?.hp ?? 0) > 0) {
   const swing = core.useAction('fire', 'crypt-warden');

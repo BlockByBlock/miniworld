@@ -19,10 +19,10 @@ import {
 } from '../movement-contracts.js';
 import {
   EXIT_POSITION,
-  EXIT_RADIUS,
   HEAL_FRACTION,
   applyChestRewards,
   attackDamage,
+  computeZoneNeighbors,
   evaluateChestBlock,
   evaluateGateOpen,
   isRunVictory,
@@ -30,19 +30,13 @@ import {
   playerDamage,
   runObjectivesComplete,
 } from './world-rules.js';
-
-const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
 const MOVE_ARRIVE_DISTANCE = 0.35;
 const MOVE_TICK_SECONDS = 0.1;
 
-function deepCopy(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
+const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
 export function createGameCore({
   seed = 1,
   worldData = WORLD_DATA,
-  colliders = [],
 } = {}) {
   const rng = createRng(seed);
   const currentSeed = seed;
@@ -53,30 +47,18 @@ export function createGameCore({
   const roomIds = new Set(map.rooms.map((room) => room.id));
   const roomBranch = worldData.roomBranch;
 
-  // Geometric zone adjacency, identical to the rendered game's build-time
-  // computation in main.js.
-  const zoneNeighbors = new Map(zones.map((zone) => {
-    const neighbors = zones
-      .filter((candidate) => candidate !== zone)
-      .filter((candidate) => {
-        const overlapX = Math.min(zone.maxX, candidate.maxX) - Math.max(zone.minX, candidate.minX);
-        const overlapZ = Math.min(zone.maxZ, candidate.maxZ) - Math.max(zone.minZ, candidate.minZ);
-        return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
-      })
-      .map((candidate) => candidate.id);
-    return [zone.id, neighbors];
-  }));
+  // Shared with the rendered game so the two can never drift.
+  const zoneNeighbors = computeZoneNeighbors(zones);
 
   // Navmesh-level walkability: zone bounds plus corridor clearance, without
-  // furniture colliders (those are presentation-layer obstacles). Scenarios
-  // that need solid obstacles can inject colliders ({minX..maxZ, visible}).
+  // furniture colliders (those are presentation-layer obstacles).
   const navigation = createNavigationContext({
     getMode: () => state.mode,
     townBounds: worldData.town.bounds,
     worldBounds: worldData.world,
     mapZones: zones,
     corridorZoneIds,
-    staticColliders: colliders,
+    staticColliders: [],
     townStaticColliders: [],
   });
 
@@ -87,7 +69,6 @@ export function createGameCore({
   let events = [];
   const record = (type, payload = {}) => {
     events.push({ t: Number(state.elapsed.toFixed(3)), type, ...payload });
-    if (events.length > 400) events = events.slice(-300);
   };
 
   function makeState() {
@@ -115,18 +96,24 @@ export function createGameCore({
       trailTimer: 0,
       playerX: worldData.player.x,
       playerZ: worldData.player.z,
-      enemies: worldData.enemySpawns.map((spawn) => ({
-        id: spawn.id,
-        name: spawn.name,
-        profileKey: spawn.profileKey,
-        roomId: spawn.roomId,
-        x: spawn.position[0],
-        z: spawn.position[1],
-        hp: spawn.maxHp,
-        maxHp: spawn.maxHp,
-        dead: false,
-        lootDropped: false,
-      })),
+      enemies: worldData.enemySpawns.map((spawn) => {
+        const profile = worldData.enemyProfiles[spawn.profileKey];
+        return {
+          id: spawn.id,
+          name: spawn.name,
+          profileKey: spawn.profileKey,
+          roomId: spawn.roomId,
+          x: spawn.position[0],
+          z: spawn.position[1],
+          hp: spawn.maxHp,
+          maxHp: spawn.maxHp,
+          dead: false,
+          lootDropped: false,
+          awake: false,
+          // First swing comes after the profile windup, like production.
+          attackTimer: profile?.windup ?? 0,
+        };
+      }),
       gates: map.corridors.map((corridor) => ({
         id: `${corridor.id}-gate`,
         corridorId: corridor.id,
@@ -197,12 +184,22 @@ export function createGameCore({
   const chestById = (id) => state.chests.find((chest) => chest.id === id) ?? null;
   const gateByCorridor = (corridorId) => state.gates.find((gate) => gate.corridorId === corridorId) ?? null;
 
+  // Equipment rules (mirrors main.js): an equipped item scales damage and
+  // cooldowns; agents reach them through the equip() semantic action.
+  function equippedDefinition() {
+    const itemId = state.equippedSlot === null ? null : state.inventory[state.equippedSlot];
+    return itemId ? worldData.items[itemId] : null;
+  }
+  const itemDamageMultiplier = (action) => equippedDefinition()?.damage?.[action] ?? 1;
+  const actionCooldownFor = (action) => actions[action].cooldown * (equippedDefinition()?.cooldown?.[action] ?? 1);
 
   // --- internal transitions ----------------------------------------------------
 
   function enterDungeon() {
     if (state.mode === 'dungeon') return;
     state.mode = 'dungeon';
+    state.started = false;
+    state.combatStarted = false;
     // Mirrors the rendered trail: the actor always arrives at the entrance
     // vault door, regardless of where they stood in Ravenrest.
     state.playerX = 0;
@@ -305,13 +302,14 @@ export function createGameCore({
         state.playerX = point.x;
         state.playerZ = point.z;
         updateProgression();
+        checkVictory();
         return { ok: true, steps: stepIndex, position: { x: point.x, z: point.z } };
       }
       state.started = true;
       const speed = worldData.player.speed * 1.15; // matches the auto-walk pace
       const offsetX = (dx / distance) * speed * MOVE_TICK_SECONDS;
       const offsetZ = (dz / distance) * speed * MOVE_TICK_SECONDS;
-      stepActorWithinMap(point, offsetX, offsetZ, navigation.modeBounds(), isWalkable);
+      stepActorWithinMap(point, offsetX, offsetZ, navigation.modeBounds(), isWalkable, 0.65);
       state.playerX = point.x;
       state.playerZ = point.z;
       updateProgression();
@@ -423,10 +421,10 @@ export function createGameCore({
         return { ok: false, reason: 'out-of-range', distance };
       }
       state.combatStarted = true;
-      const damage = playerDamage(
-        attackDamage(action, target.profileKey),
-        { buffed: state.playerBuffTimer > 0 },
-      );
+      const damage = playerDamage(attackDamage(action, target.profileKey), {
+        buffed: state.playerBuffTimer > 0,
+        itemMultiplier: itemDamageMultiplier(action),
+      });
       killEnemy(target, action, damage);
     } else if (action === 'heal') {
       const restored = Math.min(
@@ -439,15 +437,34 @@ export function createGameCore({
       state.playerBuffTimer = 8;
       record('buff-active', { duration: 8 });
     }
-    state.actionCooldowns[action] = actions[action].cooldown;
+    state.actionCooldowns[action] = actionCooldownFor(action);
     state.started = true;
     return { ok: true, action };
+  }
+
+  function equip(slot) {
+    if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
+    const itemId = state.inventory[slot];
+    if (!itemId) return { ok: false, reason: 'empty-slot' };
+    state.equippedSlot = slot;
+    record('equipped', { itemId, slot });
+    return { ok: true, itemId, slot };
   }
 
   // Mirrors interact()'s priority and radii exactly.
   function interact() {
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
-    if (state.mode === 'town') return talkTo('Hunter');
+    if (state.mode === 'town') {
+      // Production talks to the nearest NPC of any role, not just the hunter.
+      const npc = worldData.town.npcs
+        .map((candidate) => ({
+          candidate,
+          d: Math.hypot(state.playerX - candidate.position[0], state.playerZ - candidate.position[1]),
+        }))
+        .sort((a, b) => a.d - b.d)[0];
+      if (npc && npc.d <= INTERACT_RADII.npc) return talkTo(npc.candidate.role);
+      return { ok: false, reason: 'nothing-nearby' };
+    }
     state.started = true;
     const nearest = (list, radius, pick) => list
       .map((item) => ({ item, d: Math.hypot(state.playerX - pick(item).x, state.playerZ - pick(item).z) }))
@@ -487,8 +504,6 @@ export function createGameCore({
     return { ok: false, reason: 'nothing-nearby' };
   }
 
-  // --- time ----------------------------------------------------------------------
-
   function advanceTimers(delta) {
     state.elapsed += delta;
     for (const action of actionKeys) {
@@ -498,6 +513,41 @@ export function createGameCore({
     if (state.trailTimer > 0) {
       state.trailTimer -= delta;
       if (state.trailTimer <= 0) enterDungeon();
+    }
+    simulateEnemyAttacks(delta);
+  }
+
+  // Deterministic defense model: enemies hold their spawn position, wake
+  // inside leash range of the player, and swing on their profile cooldown
+  // whenever the player stands within attack range. The ward absorbs hits,
+  // and a fallen player fails the run — so the loss path is exercisable.
+  function simulateEnemyAttacks(delta) {
+    if (state.mode !== 'dungeon' || state.finished || state.failed) return;
+    for (const enemy of state.enemies) {
+      if (enemy.dead || !enemyAccessible(enemy)) continue;
+      const profile = worldData.enemyProfiles[enemy.profileKey];
+      if (!profile) continue;
+      const distance = Math.hypot(state.playerX - enemy.x, state.playerZ - enemy.z);
+      if (distance > (profile.leash ?? Infinity)) {
+        enemy.awake = false;
+        continue;
+      }
+      enemy.awake = true;
+      if (distance > profile.attackRange) continue;
+      enemy.attackTimer -= delta;
+      if (enemy.attackTimer > 0) continue;
+      enemy.attackTimer = profile.attackCooldown;
+      if (state.playerBuffTimer > 0) {
+        record('damage-absorbed', { from: enemy.id });
+        continue;
+      }
+      state.playerHp = Math.max(0, state.playerHp - profile.damage);
+      record('player-damaged', { from: enemy.id, damage: profile.damage, hp: state.playerHp });
+      if (state.playerHp <= 0) {
+        state.failed = true;
+        record('run-finished', { success: false });
+        return;
+      }
     }
   }
 
@@ -515,26 +565,28 @@ export function createGameCore({
   }
 
   function tick(delta = 0.1) {
-    advanceTimers(delta);
-    checkVictory();
+    // Fixed-step simulation: long ticks resolve in 0.1s slices so cooldowns,
+    // windups, and the trail timer behave identically at any caller cadence.
+    let remaining = Math.max(0, delta);
+    while (remaining > 0 && !state.finished && !state.failed) {
+      const step = Math.min(MOVE_TICK_SECONDS, remaining);
+      remaining -= step;
+      advanceTimers(step);
+      checkVictory();
+    }
     return { elapsed: state.elapsed, finished: state.finished };
   }
 
   // --- checkpoints -----------------------------------------------------------------
-
   function saveCheckpoint() {
-    return deepCopy({ version: 1, state, events });
+    return structuredClone({ state, events });
   }
 
   function loadCheckpoint(checkpoint) {
-    if (!checkpoint || checkpoint.version !== 1) {
-      throw new Error('Unsupported checkpoint format.');
-    }
-    Object.assign(state, deepCopy(checkpoint.state));
-    events = deepCopy(checkpoint.events ?? []);
+    Object.assign(state, structuredClone(checkpoint.state));
+    events = structuredClone(checkpoint.events ?? []);
     return { ok: true };
   }
-
   // --- structured state / debug representation ---------------------------------------
 
   function describe() {
@@ -543,7 +595,7 @@ export function createGameCore({
       wardenSpoilsOpened,
       livingEnemyCount: livingEnemyCount(),
     });
-    return deepCopy({
+    return structuredClone({
       mode: state.mode,
       started: state.started,
       finished: state.finished,
@@ -586,7 +638,7 @@ export function createGameCore({
         maxHp: enemy.maxHp,
         dead: enemy.dead,
       })),
-      loot: deepCopy(state.loot.filter((drop) => !drop.collected)),
+      loot: structuredClone(state.loot.filter((drop) => !drop.collected)),
       objectives: {
         westSeal: state.seals.west,
         eastSeal: state.seals.east,
@@ -601,7 +653,7 @@ export function createGameCore({
     });
   }
 
-  const getEvents = () => deepCopy(events);
+  const getEvents = () => structuredClone(events);
 
   return {
     // semantic actions
@@ -611,6 +663,7 @@ export function createGameCore({
     interact,
     openGate,
     useAction,
+    equip,
     // test affordance mirroring __cryptTest.clearRoom
     clearRoom(roomId) {
       for (const enemy of state.enemies) {

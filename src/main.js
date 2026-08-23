@@ -20,7 +20,7 @@ import {
 import { WORLD_DATA } from './world-data.js';
 import {
   EXIT_POSITION,
-  EXIT_RADIUS,
+  HEAL_FRACTION,
   applyChestRewards,
   attackDamage,
   evaluateChestBlock,
@@ -91,7 +91,6 @@ const ACTIONS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, 
   cooldown: action.cooldown,
   range: action.range,
 }]));
-const HEAL_FRACTION = 0.3;
 const ACTION_NAMES = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.name]));
 const ACTION_BAR_KEYS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.keys]));
 
