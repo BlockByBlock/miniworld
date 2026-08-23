@@ -23,7 +23,7 @@ to a telegraphed Warden encounter. At half health, the Warden enters a second
 phase, accelerates, changes the crypt lighting, and casts a player-targeted
 Soul Collapse that must be dodged. A schematic minimap, selected-target frame,
 action-bar cooldowns, projected enemy nameplates and cast bars, combat status, and
-floating feedback keep the larger delve readable. Fire and Frostbolt now use
+floating feedback keep the larger delve readable. Fire and Frostbolt use
 distinct cast clips, travelling projectiles, and impact timing; Heal resolves
 after its cast, while Ward wraps the knight in an orbiting protective shell.
 Enemies leave physical loot
