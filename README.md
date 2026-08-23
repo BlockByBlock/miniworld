@@ -23,7 +23,7 @@ to a telegraphed Warden encounter. At half health, the Warden enters a second
 phase, accelerates, changes the crypt lighting, and casts a player-targeted
 Soul Collapse that must be dodged. A schematic minimap, selected-target frame,
 action-bar cooldowns, projected enemy nameplates and cast bars, combat status, and
-floating feedback keep the larger delve readable. Fire and Frostbolt now use
+floating feedback keep the larger delve readable. Fire and Frostbolt use
 distinct cast clips, travelling projectiles, and impact timing; Heal resolves
 after its cast, while Ward wraps the knight in an orbiting protective shell.
 Enemies leave physical loot
@@ -63,7 +63,15 @@ reliquaries, Archive cache, and Warden spoils drive the required route.
 npm run build
 ```
 
-Stable world content lives in [src/data/world.json](./src/data/world.json) and is validated by `npm test`; its asset keys point to files under `public/assets`, while runtime behavior and rendering remain in `src/main.js`.
+Stable world content lives in [src/data/world.json](./src/data/world.json) and is validated by `npm test`; its asset keys point to files under `public/assets`.
+
+The game rules are split from the 3D presentation:
+
+- `src/game/world-rules.js` — pure, shared gameplay decisions (gate/chest gating, chest rewards, loot table, damage math, win condition). Both the rendered game and the headless core import these, so there is one definition of each rule.
+- `src/game/game-core.js` — a fully deterministic headless simulation (`createGameCore({ worldData })`). Agents drive it through semantic actions (`talkTo`, `moveTo`, `interact`, `openGate`, `useAction`, `equip`) instead of keyboard or mouse input, advance time explicitly with `tick(delta)`, save/restore checkpoints mid-run for controlled start states, and read structured state via `describe()` and an event log. Room-clearing during agent routes may use the explicit `clearRoom()` test affordance (an accelerated stand-in for combat); the warden fight itself is fought through semantic `useAction` calls.
+- `src/main.js` — rendering, animation, audio, input, and UI; it delegates gameplay decisions to the shared rules.
+
+Run a full New Game-to-victory delve headlessly (no browser) with `npm run test:headless`.
 
 See [ASSET_CREDITS.md](./ASSET_CREDITS.md) for the exact source commit and
 license record for the bundled models.

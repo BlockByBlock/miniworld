@@ -5,12 +5,46 @@ import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
+import {
+  collectDungeonLightRecipes,
+  createCryptProfile,
+  createSlotPool,
+  waitForProfileTarget,
+} from './optimization-contracts.js';
+import {
+  cameraRelativeDirection,
+  createNavigationContext,
+  isWalkablePoint,
+  stepActorWithinMap,
+} from './movement-contracts.js';
+import { initAudio, playSfx } from './audio.js';
 import { WORLD_DATA } from './world-data.js';
+import { ROOM_DECORATIONS } from './game/room-decorations.js';
+import {
+  EXIT_POSITION,
+  HEAL_FRACTION,
+  INTERACT_RADII,
+  applyChestRewards,
+  attackDamage,
+  computeZoneNeighbors,
+  evaluateChestBlock,
+  evaluateGateOpen,
+  findRoomAt,
+  findZoneAt,
+  isRunVictory,
+  lootItemForProfile,
+  playerDamage as computePlayerDamage,
+  resolveRoomEntry,
+  runObjectivesComplete as evaluateObjectivesComplete,
+  visibleZoneIdsFor,
+} from './game/world-rules.js';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
 
 const canvas = $('#scene');
+const app = $('#app');
+const E2E_ENABLED = new URLSearchParams(window.location.search).has('e2e');
 const loadingScreen = $('#loading');
 const loadingFill = $('#loading-fill');
 const loadingLabel = $('#loading-label');
@@ -65,7 +99,6 @@ const ACTIONS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, 
   cooldown: action.cooldown,
   range: action.range,
 }]));
-const HEAL_FRACTION = 0.3;
 const ACTION_NAMES = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.name]));
 const ACTION_BAR_KEYS = Object.fromEntries(Object.entries(WORLD_DATA.actions).map(([id, action]) => [id, action.keys]));
 
@@ -79,6 +112,18 @@ const SPELL_COLORS = Object.fromEntries(Object.entries(WORLD_DATA.actions)
 const SPELL_CAST_TIMES = Object.fromEntries(Object.entries(WORLD_DATA.actions)
   .filter(([, action]) => action.castTime !== undefined)
   .map(([id, action]) => [id, action.castTime]));
+
+// Per-action runtime constants that are presentation/timing concerns rather
+// than world data: windup locks, recovery, cast clips/timers, and resolve
+// behavior. One row per action instead of ternaries scattered through
+// useAction and applyPlayerAction.
+const ACTION_RUNTIME = {
+  sword: { attackLock: 0.67, attackCooldown: 0.52, attackTimer: 0.24, clips: ['1h_melee_attack', 'melee_attack', 'attack'], spell: false },
+  fire: { attackLock: 0.58, attackCooldown: 0.78, attackTimer: SPELL_CAST_TIMES.fire, castClip: 'Cast_Fire', spell: true },
+  freeze: { attackLock: 0.58, attackCooldown: 0.78, attackTimer: SPELL_CAST_TIMES.freeze, castClip: 'Cast_Frost', spell: true },
+  heal: { attackLock: 0.62, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.heal, castClip: 'Cast_Heal', spell: true },
+  buff: { attackLock: 0.56, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.buff, castClip: 'Cast_Arcane', spell: true },
+};
 const ITEM_DEFS = WORLD_DATA.items;
 const ENEMY_PROFILES = WORLD_DATA.enemyProfiles;
 const WORLD = WORLD_DATA.world;
@@ -90,17 +135,7 @@ MAP.zones = [...MAP.rooms, ...MAP.corridors];
 const corridorZones = new Set(MAP.corridors);
 const ZONE_BY_ID = new Map(MAP.zones.map((zone) => [zone.id, zone]));
 const ROOM_IDS = new Set(MAP.rooms.map((room) => room.id));
-const ZONE_NEIGHBORS = new Map(MAP.zones.map((zone) => {
-  const neighbors = MAP.zones
-    .filter((candidate) => candidate !== zone)
-    .filter((candidate) => {
-      const overlapX = Math.min(zone.maxX, candidate.maxX) - Math.max(zone.minX, candidate.minX);
-      const overlapZ = Math.min(zone.maxZ, candidate.maxZ) - Math.max(zone.minZ, candidate.minZ);
-      return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
-    })
-    .map((candidate) => candidate.id);
-  return [zone.id, neighbors];
-}));
+const ZONE_NEIGHBORS = computeZoneNeighbors(MAP.zones);
 
 const state = {
   loaded: false,
@@ -131,7 +166,9 @@ const state = {
   cameraShake: 0,
   cameraFovKick: 0,
   cameraOffset: new THREE.Vector3(),
-  exitPosition: new THREE.Vector3(0, 32.4, 0),
+  // The player uses (x, y, z) with y fixed at ground level; the southern exit
+  // is in the entrance room at z=32.4.
+  exitPosition: new THREE.Vector3(EXIT_POSITION.x, 0, EXIT_POSITION.z),
   elapsed: 0,
   uiTimer: 0,
   overlayTimer: 0,
@@ -141,6 +178,8 @@ const state = {
   frameSampleFrames: 0,
   resolutionCooldown: 0,
   fastFrameSamples: 0,
+  interactionCount: 0,
+  lastInteraction: null,
 };
 
 const keys = new Set();
@@ -157,9 +196,121 @@ const combatTexts = [];
 const lootDrops = [];
 const zoneRenderGroups = new Map();
 const visibleZoneIds = new Set();
+const navigation = createNavigationContext({
+  getMode: () => state.mode,
+  townBounds: TOWN_WORLD,
+  worldBounds: WORLD,
+  mapZones: MAP.zones,
+  corridorZoneIds: corridorZones,
+  staticColliders,
+  townStaticColliders,
+});
+const e2eState = {
+  errors: [],
+  smoke: null,
+  lastResult: null,
+  fastGateTransitions: 0,
+};
+let e2eStatus = null;
+
+function e2eSnapshot() {
+  return {
+    mode: state.mode,
+    zoneId: state.currentZoneId,
+    roomId: state.currentRoomId,
+    position: player
+      ? { x: player.root.position.x, y: player.root.position.y, z: player.root.position.z }
+      : null,
+    playerHp: state.playerHp,
+    seals: { ...state.seals },
+    archiveKey: state.archiveKey,
+    chests: state.chests.map((chest) => ({
+      id: chest.id,
+      roomId: chest.roomId,
+      kind: chest.kind,
+      opened: chest.opened,
+    })),
+    gates: state.gates.map((gate) => ({
+      corridorId: gate.corridorId,
+      open: gate.open,
+      fromRoomId: gate.fromRoomId,
+      toRoomId: gate.toRoomId,
+    })),
+    enemies: enemies.map((enemy) => ({ id: enemy.name, roomId: enemy.roomId, dead: enemy.dead })),
+    livingEnemies: countLivingEnemies(),
+    loot: lootDrops.map((drop) => ({ itemId: drop.itemId, collected: drop.collected })),
+    objectives: {
+      complete: runObjectivesComplete(),
+      title: objective.textContent,
+      detail: objectiveDetail.textContent,
+    },
+    finished: state.finished,
+    failed: state.failed,
+    interactionCount: state.interactionCount,
+    lastInteraction: state.lastInteraction,
+    windowRuntimeErrors: [...e2eState.errors],
+  };
+}
+
+let lastPublishAt = -Infinity;
+function publishE2eSnapshot(force = false) {
+  if (!E2E_ENABLED || !e2eStatus) return;
+  // Interface ticks call this every frame; serialize at most every 100 ms
+  // unless a caller forces it (results, errors, readiness flips).
+  const now = performance.now();
+  if (!force && now - lastPublishAt < 100) return;
+  lastPublishAt = now;
+  const snapshot = e2eSnapshot();
+  const serialized = JSON.stringify(snapshot);
+  app.dataset.gameReady = String(state.loaded);
+  app.dataset.e2eSnapshot = serialized;
+  app.dataset.e2eResult = e2eState.lastResult ? JSON.stringify(e2eState.lastResult) : '';
+  app.dataset.e2eErrors = JSON.stringify(e2eState.errors);
+  e2eStatus.value = serialized;
+  e2eStatus.textContent = serialized;
+}
+
+function sampleKeyboardSmokeMovement() {
+  const smoke = e2eState.smoke;
+  if (!smoke || !player) return;
+  const position = player.root.position;
+  if (smoke.sampleMode !== state.mode) {
+    smoke.sampleMode = state.mode;
+    smoke.sample = { x: position.x, z: position.z };
+    return;
+  }
+  const dx = position.x - smoke.sample.x;
+  const dz = position.z - smoke.sample.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance > 0.0001) {
+    smoke.pathDistance += distance;
+    smoke.forwardTravel += dx * smoke.cameraForward.x + dz * smoke.cameraForward.z;
+  }
+  smoke.sample = { x: position.x, z: position.z };
+}
+
+function setE2eResult(result) {
+  e2eState.lastResult = result;
+  publishE2eSnapshot(true);
+}
+
+if (E2E_ENABLED) {
+  e2eStatus = document.createElement('output');
+  e2eStatus.id = 'e2e-status';
+  e2eStatus.hidden = true;
+  e2eStatus.setAttribute('aria-label', 'End-to-end test state');
+  app.append(e2eStatus);
+  window.addEventListener('error', (event) => {
+    e2eState.errors.push(event.error?.message ?? event.message ?? 'runtime error');
+    publishE2eSnapshot(true);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    e2eState.errors.push(String(event.reason?.message ?? event.reason ?? 'unhandled rejection'));
+    publishE2eSnapshot(true);
+  });
+}
 
 let activeWorldGroup = null;
-
 const dungeonScene = new THREE.Scene();
 const townScene = new THREE.Scene();
 const scene = dungeonScene;
@@ -225,132 +376,6 @@ let player;
 let toastTimeout;
 let pointerPress = null;
 let selectedTarget = null;
-let audioContext = null;
-let noiseBuffer = null;
-let moonLight = null;
-let blobShadowMesh = null;
-let townBlobShadowMesh = null;
-let townWorldGroup = null;
-let wardVisual = null;
-let targetMarker = null;
-let dialogueTimeout;
-
-const blobShadowPosition = new THREE.Vector3();
-const blobShadowScale = new THREE.Vector3();
-const blobShadowRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-const blobShadowMatrix = new THREE.Matrix4();
-
-function setLoading(progress, label) {
-  loadingFill.style.width = `${Math.round(progress * 100)}%`;
-  loadingLabel.textContent = label;
-}
-
-function setToast(message, duration = 2200) {
-  toast.textContent = message;
-  toast.classList.add('is-visible');
-  window.clearTimeout(toastTimeout);
-  toastTimeout = window.setTimeout(() => toast.classList.remove('is-visible'), duration);
-}
-
-function initAudio() {
-  if (!audioContext) {
-    const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    audioContext = new AudioContextClass();
-    noiseBuffer = audioContext.createBuffer(1, Math.floor(audioContext.sampleRate * 0.35), audioContext.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let index = 0; index < data.length; index += 1) data[index] = Math.random() * 2 - 1;
-  }
-  if (audioContext.state === 'suspended') audioContext.resume();
-}
-
-function playTone({ frequency = 220, endFrequency = frequency, duration = 0.12, gain = 0.035, type = 'sine' } = {}) {
-  if (!audioContext || audioContext.state !== 'running') return;
-  const now = audioContext.currentTime;
-  const oscillator = audioContext.createOscillator();
-  const volume = audioContext.createGain();
-  oscillator.type = type;
-  oscillator.frequency.setValueAtTime(frequency, now);
-  oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), now + duration);
-  volume.gain.setValueAtTime(gain, now);
-  volume.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-  oscillator.connect(volume).connect(audioContext.destination);
-  oscillator.start(now);
-  oscillator.stop(now + duration);
-}
-
-function playNoise({ duration = 0.08, gain = 0.025, frequency = 900 } = {}) {
-  if (!audioContext || audioContext.state !== 'running' || !noiseBuffer) return;
-  const now = audioContext.currentTime;
-  const source = audioContext.createBufferSource();
-  const filter = audioContext.createBiquadFilter();
-  const volume = audioContext.createGain();
-  source.buffer = noiseBuffer;
-  filter.type = 'lowpass';
-  filter.frequency.value = frequency;
-  volume.gain.setValueAtTime(gain, now);
-  volume.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-  source.connect(filter).connect(volume).connect(audioContext.destination);
-  source.start(now);
-  source.stop(now + duration);
-}
-
-function playSfx(name) {
-  if (!audioContext || audioContext.state !== 'running') return;
-  if (name === 'sword') {
-    playNoise({ duration: 0.09, gain: 0.035, frequency: 1800 });
-    playTone({ frequency: 210, endFrequency: 105, duration: 0.1, gain: 0.018, type: 'triangle' });
-  } else if (name === 'fire') {
-    playNoise({ duration: 0.2, gain: 0.025, frequency: 1400 });
-    playTone({ frequency: 180, endFrequency: 420, duration: 0.18, gain: 0.026, type: 'sawtooth' });
-  } else if (name === 'cast-fire') {
-    playTone({ frequency: 180, endFrequency: 520, duration: 0.24, gain: 0.018, type: 'sawtooth' });
-  } else if (name === 'fire-launch') {
-    playNoise({ duration: 0.08, gain: 0.018, frequency: 1800 });
-  } else if (name === 'fire-impact') {
-    playNoise({ duration: 0.16, gain: 0.03, frequency: 1200 });
-    playTone({ frequency: 260, endFrequency: 90, duration: 0.18, gain: 0.022, type: 'triangle' });
-  } else if (name === 'freeze') {
-    playTone({ frequency: 740, endFrequency: 290, duration: 0.28, gain: 0.026, type: 'sine' });
-    playTone({ frequency: 980, endFrequency: 520, duration: 0.2, gain: 0.014, type: 'triangle' });
-  } else if (name === 'cast-freeze') {
-    playTone({ frequency: 420, endFrequency: 980, duration: 0.3, gain: 0.018, type: 'sine' });
-  } else if (name === 'frost-launch') {
-    playTone({ frequency: 960, endFrequency: 620, duration: 0.12, gain: 0.014, type: 'triangle' });
-  } else if (name === 'frost-impact') {
-    playTone({ frequency: 1080, endFrequency: 260, duration: 0.24, gain: 0.022, type: 'sine' });
-    playNoise({ duration: 0.1, gain: 0.018, frequency: 2400 });
-  } else if (name === 'cast-heal') {
-    playTone({ frequency: 260, endFrequency: 640, duration: 0.32, gain: 0.018, type: 'sine' });
-  } else if (name === 'heal-impact') {
-    playTone({ frequency: 520, endFrequency: 860, duration: 0.24, gain: 0.02, type: 'sine' });
-  } else if (name === 'cast-buff') {
-    playTone({ frequency: 220, endFrequency: 740, duration: 0.28, gain: 0.018, type: 'triangle' });
-  } else if (name === 'ward-impact') {
-    playTone({ frequency: 360, endFrequency: 180, duration: 0.24, gain: 0.022, type: 'triangle' });
-  } else if (name === 'hurt') {
-    playNoise({ duration: 0.13, gain: 0.045, frequency: 520 });
-    playTone({ frequency: 120, endFrequency: 70, duration: 0.16, gain: 0.03, type: 'square' });
-  } else if (name === 'pickup') {
-    playTone({ frequency: 410, endFrequency: 760, duration: 0.16, gain: 0.026, type: 'sine' });
-  } else if (name === 'equip') {
-    playTone({ frequency: 270, endFrequency: 430, duration: 0.14, gain: 0.025, type: 'triangle' });
-  } else if (name === 'room') {
-    playTone({ frequency: 130, endFrequency: 190, duration: 0.3, gain: 0.012, type: 'sine' });
-  } else if (name === 'step') {
-    playNoise({ duration: 0.045, gain: 0.012, frequency: 260 });
-  } else if (name === 'chest') {
-    playTone({ frequency: 330, endFrequency: 660, duration: 0.22, gain: 0.027, type: 'triangle' });
-  } else if (name === 'warden-phase') {
-    playNoise({ duration: 0.28, gain: 0.035, frequency: 420 });
-    playTone({ frequency: 92, endFrequency: 38, duration: 0.5, gain: 0.032, type: 'sawtooth' });
-    playTone({ frequency: 180, endFrequency: 72, duration: 0.36, gain: 0.022, type: 'triangle' });
-  } else if (name === 'warden-collapse') {
-    playNoise({ duration: 0.12, gain: 0.026, frequency: 680 });
-    playTone({ frequency: 120, endFrequency: 420, duration: 0.34, gain: 0.022, type: 'square' });
-  }
-}
-
 function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraShake = Math.max(state.cameraShake, shake);
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
@@ -802,10 +827,45 @@ function addBox({
   return mesh;
 }
 
-function addPointLight(x, z, color = 0xffbd74, intensity = 2.4) {
-  const light = new THREE.PointLight(color, intensity, 7, 2);
-  light.position.set(x, 2.2, z);
-  addWorldObject(light);
+// Point-light pool: the dungeon uses a fixed set of always-visible lights whose
+// positions/colors/intensities are re-applied per zone view. Keeping the visible
+// light count constant avoids shader program recompilation hitches when rooms
+// toggle visibility.
+const DUNGEON_LIGHT_POOL_SIZE = 5;
+
+let dungeonLightPool = [];
+const dungeonZoneLights = new Map();
+
+function recordZoneLight(zoneId, { x, z, color = 0xffbd74, intensity = 2.4 }) {
+  if (!dungeonZoneLights.has(zoneId)) dungeonZoneLights.set(zoneId, []);
+  dungeonZoneLights.get(zoneId).push({ x, z, color, intensity });
+}
+
+function applyDungeonLights() {
+  const recipes = collectDungeonLightRecipes(visibleZoneIds, dungeonZoneLights, DUNGEON_LIGHT_POOL_SIZE);
+  for (let index = 0; index < dungeonLightPool.length; index += 1) {
+    const light = dungeonLightPool[index];
+    const recipe = recipes[index];
+    if (!recipe) {
+      // Lights stay in the scene and "on" at all times; unused slots drop to
+      // zero intensity so the shader's light count never changes.
+      light.position.set(0, -50, 0);
+      light.intensity = 0;
+      continue;
+    }
+    light.color.set(recipe.color);
+    light.intensity = recipe.intensity;
+    light.position.set(recipe.x, 2.2, recipe.z);
+  }
+}
+
+function buildDungeonLightPool() {
+  for (let index = 0; index < DUNGEON_LIGHT_POOL_SIZE; index += 1) {
+    const light = new THREE.PointLight(0xffbd74, 0, 7, 2);
+    light.position.set(0, -50, 0);
+    dungeonScene.add(light);
+    dungeonLightPool.push(light);
+  }
 }
 
 function buildLighting() {
@@ -1085,138 +1145,27 @@ function addWallTorch(room, wall, along) {
 
 function addRoomLight(room, color, intensity = 1.35) {
   const center = roomCenter(room);
-  addPointLight(center.x, center.z, color, intensity);
+  recordZoneLight(room.id, { x: center.x, z: center.z, color, intensity });
 }
 
-function decorateRoom(room) {
-  if (room.id === 'entrance') {
-    addColumn(-7.5, 23);
-    addColumn(7.5, 23);
-    addColumn(-7.5, 31);
-    addColumn(7.5, 31);
-    addWallTorch(room, 'west', 27);
-    addWallTorch(room, 'east', 27);
-    addDecoration('banner', room.minX + 0.7, 27, { height: 2.65, rotationY: Math.PI / 2 });
-    addDecoration('banner', room.maxX - 0.7, 27, { height: 2.65, rotationY: -Math.PI / 2 });
-    addDecoration('candleTriple', -8.4, 29.2, { height: 0.48 });
-    addDecoration('candleTriple', 8.4, 24.8, { height: 0.48, rotationY: Math.PI / 2 });
-    addRoomLight(room, 0xffbd74, 1.5);
-  } else if (room.id === 'hub') {
-    for (const [x, z] of [[-10, 5], [10, 5], [-10, 15], [10, 15]]) addColumn(x, z, 3);
-    addTomb(0, 10, 0, 1.15);
-    addWallTorch(room, 'north', -9);
-    addWallTorch(room, 'north', 9);
-    addWallTorch(room, 'south', -9);
-    addWallTorch(room, 'south', 9);
-    addDecoration('banner', room.minX + 0.7, 10, { height: 2.65, rotationY: Math.PI / 2 });
-    addDecoration('banner', room.maxX - 0.7, 10, { height: 2.65, rotationY: -Math.PI / 2 });
-    addDecoration('rubbleHalf', -12.1, 3.4, { width: 1.8 });
-    addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
-    addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
-    addRoomLight(room, 0xffa767, 1.75);
-    addPointLight(-6.1, 4.25);
-    addPointLight(6.1, 4.25, 0xffa767, 2.6);
-    addPointLight(0, -4.75, 0x8e9aff, 2.2);
-  } else if (room.id === 'westGate') {
-    for (const x of [-30, -26, -22]) {
-      addTomb(x, 4.4, Math.PI / 2, 0.82);
-      addTomb(x, 13.6, Math.PI / 2, 0.82);
+// Decoration ops are data (src/game/room-decorations.js); this is the
+// interpreter that maps each op onto the world-building helpers.
+const DECOR_OPS = {
+  column: (_, { x, z, height = 2.7 }) => addColumn(x, z, height),
+  tomb: (_, { x, z, rotationY = 0, scale = 1 }) => addTomb(x, z, rotationY, scale),
+  torch: (room, { wall, along }) => addWallTorch(room, wall, along),
+  decoration: (room, { asset, x, z, ...options }) => addDecoration(asset, x, z, options),
+  brokenFloor: (_, { asset, x, z, rotationY }) => addBrokenFloor(asset, x, z, rotationY),
+  light: (room, { color, intensity }) => addRoomLight(room, color, intensity),
+  zoneLight: (room, { x, z, color, intensity }) => recordZoneLight(room.id, { x, z, color, intensity }),
+  box: (_, spec) => addBox(spec),
+  water: (_, { spots, ...spec }) => {
+    const material = new THREE.MeshStandardMaterial({ color: 0x244e61, roughness: 0.42, metalness: 0.14 });
+    for (const [x, z] of spots) {
+      addBox({ x, y: 0.03, z, width: spec.width, height: spec.height ?? 0.08, depth: spec.depth, material });
     }
-    addWallTorch(room, 'north', -26);
-    addWallTorch(room, 'south', -26);
-    addDecoration('cobweb', -32.8, 3.1, { height: 1.25, rotationY: Math.PI / 2 });
-    addDecoration('cobweb', -19.2, 14.7, { height: 1.05, rotationY: -Math.PI / 2 });
-    addDecoration('boneA', -32, 14.1, { width: 1.15, rotationY: 0.4 });
-    addDecoration('rubbleLarge', -19.8, 3.4, { width: 1.8, rotationY: Math.PI });
-    addBrokenFloor('brokenFloorB', -26, 3.1, 0.25);
-    addRoomLight(room, 0xd78b64);
-  } else if (room.id === 'westBurial') {
-    for (const [x, z, rotation] of [[-53, 6, 0], [-47, 6, 0], [-41, 6, 0], [-53, 13, Math.PI], [-41, 13, Math.PI]]) {
-      addTomb(x, z, rotation, 0.9);
-    }
-    addWallTorch(room, 'south', -53);
-    addWallTorch(room, 'south', -41);
-    addDecoration('coffin', -47, 3.3, {
-      width: 2.2,
-      height: 1,
-      colliderWidth: 2.05,
-      colliderDepth: 0.9,
-    });
-    addDecoration('skullCandle', -54.2, 14.1, { height: 0.62, rotationY: -0.4 });
-    addDecoration('boneB', -39.8, 14.1, { width: 1.1, rotationY: 1.1 });
-    addDecoration('rubbleHalf', -54.2, 3.4, { width: 1.55, rotationY: 0.7 });
-    addRoomLight(room, 0xc7765c);
-  } else if (room.id === 'westOssuary') {
-    for (const [x, z] of [[-53, -13], [-41, -13], [-53, -4], [-41, -4]]) addColumn(x, z, 2.45);
-    addTomb(-47, -7, Math.PI / 2, 1.2);
-    addWallTorch(room, 'north', -53);
-    addWallTorch(room, 'north', -41);
-    addDecoration('boneA', -54.1, -14, { width: 1.15, rotationY: 0.2 });
-    addDecoration('boneB', -50.6, -14.2, { width: 1.05, rotationY: 1.5 });
-    addDecoration('boneC', -43.2, -14.1, { width: 1.2, rotationY: -0.6 });
-    addDecoration('skull', -54.4, -2, { height: 0.55, rotationY: 0.7 });
-    addDecoration('skullCandle', -39.8, -2.2, { height: 0.68 });
-    addDecoration('rubbleLarge', -39.8, -14.1, { width: 1.85, rotationY: Math.PI / 2 });
-    addRoomLight(room, 0xb08bff, 1.55);
-  } else if (room.id === 'eastGate') {
-    for (const [x, z] of [[22, 5], [30, 5], [22, 13], [30, 13]]) addColumn(x, z, 2.3);
-    const waterMaterial = new THREE.MeshStandardMaterial({ color: 0x244e61, roughness: 0.42, metalness: 0.14 });
-    addBox({ x: 26, y: 0.03, z: 5, width: 4.5, height: 0.08, depth: 2.2, material: waterMaterial });
-    addBox({ x: 26, y: 0.03, z: 13, width: 4.5, height: 0.08, depth: 2.2, material: waterMaterial });
-    addWallTorch(room, 'north', 20.5);
-    addWallTorch(room, 'south', 31.5);
-    addDecoration('barrelStack', 19.6, 14.2, {
-      width: 1.4,
-      colliderWidth: 1.25,
-      colliderDepth: 1.05,
-    });
-    addDecoration('crateStack', 32.1, 3.5, {
-      width: 1.65,
-      rotationY: Math.PI / 2,
-      colliderWidth: 1.4,
-      colliderDepth: 1.15,
-    });
-    addDecoration('woodSupport', 26, 14.5, { height: 2.15 });
-    addRoomLight(room, 0x65b6d1, 1.5);
-  } else if (room.id === 'eastFlooded') {
-    for (const [x, z, rotation] of [[41, 5, 0], [47, 5, 0], [53, 5, 0], [41, 13, Math.PI], [53, 13, Math.PI]]) {
-      addTomb(x, z, rotation, 0.9);
-    }
-    addWallTorch(room, 'south', 41);
-    addWallTorch(room, 'south', 53);
-    addDecoration('woodSupport', 47, 3.1, { height: 2.1, rotationY: Math.PI / 2 });
-    addDecoration('brokenTable', 54, 14.1, {
-      width: 2.2,
-      rotationY: Math.PI / 2,
-      colliderWidth: 1.9,
-      colliderDepth: 0.8,
-    });
-    addDecoration('boneC', 39.8, 14.1, { width: 1.15, rotationY: -0.8 });
-    addBrokenFloor('brokenFloorA', 47, 5, 0.3);
-    addBrokenFloor('brokenFloorB', 51, 13, -0.4);
-    addRoomLight(room, 0x65b6d1, 1.45);
-  } else if (room.id === 'eastReliquary') {
-    for (const [x, z] of [[41, -13], [53, -13], [41, -4], [53, -4]]) addColumn(x, z, 3.1);
-    addTomb(43, -8, 0, 0.9);
-    addTomb(51, -8, Math.PI, 0.9);
-    addWallTorch(room, 'north', 41);
-    addWallTorch(room, 'north', 53);
-    addDecoration('horseStatue', 47, -2.2, { height: 2.35, rotationY: Math.PI });
-    addDecoration('coins', 44.8, -13.3, { width: 1.2, rotationY: 0.2 });
-    addDecoration('coins', 49.2, -13.5, { width: 1, rotationY: -0.5 });
-    addDecoration('candleTriple', 39.8, -14.1, { height: 0.52 });
-    addDecoration('candleTriple', 54.2, -14.1, { height: 0.52, rotationY: Math.PI });
-    addRoomLight(room, 0xe0b75f, 1.65);
-  } else if (room.id === 'northHall') {
-    for (const [x, z] of [[-9, -7], [9, -7], [-9, -13], [9, -13]]) addColumn(x, z, 2.8);
-    addWallTorch(room, 'west', -10);
-    addWallTorch(room, 'east', -10);
-    addDecoration('rubbleHalf', -10.4, -14.4, { width: 1.55, rotationY: 0.8 });
-    addDecoration('rubbleLarge', 10.2, -5.5, { width: 1.75, rotationY: -0.5 });
-    addDecoration('cobweb', -10.8, -5.1, { height: 1.1, rotationY: Math.PI / 2 });
-    addBrokenFloor('brokenFloorB', 0, -10, Math.PI / 2);
-    addRoomLight(room, 0x8e9aff, 1.4);
-  } else if (room.id === 'northLibrary') {
+  },
+  bookcases: () => {
     for (const z of [-21, -25, -29]) {
       addDecoration('bookcase', -10.4, z, {
         height: 2.35,
@@ -1231,35 +1180,19 @@ function decorateRoom(room) {
         colliderDepth: 1.65,
       });
     }
-    addDecoration('brokenTable', 7.7, -30, {
-      width: 2.1,
-      colliderWidth: 1.85,
-      colliderDepth: 0.8,
-    });
-    addDecoration('candleTriple', -7.7, -19.5, { height: 0.5 });
-    addDecoration('cobweb', 10.7, -31, { height: 1.15, rotationY: -Math.PI / 2 });
-    addWallTorch(room, 'west', -21);
-    addWallTorch(room, 'east', -29);
-    addRoomLight(room, 0xa183cf, 1.45);
-  } else if (room.id === 'wardenKeep') {
-    for (const [x, z, rotation] of [[-12, -38, 0], [12, -38, 0], [-12, -46, Math.PI], [12, -46, Math.PI]]) {
-      addTomb(x, z, rotation, 1.05);
-    }
-    for (const [x, z] of [[-7, -37], [7, -37], [-7, -47], [7, -47]]) addColumn(x, z, 3.2);
-    addDecoration('coffin', -13.8, -42, {
-      width: 2.2,
-      rotationY: Math.PI / 2,
-      colliderWidth: 0.9,
-      colliderDepth: 2.05,
-    });
-    addDecoration('rubbleLarge', 13.8, -35.8, { width: 1.9, rotationY: -0.6 });
-    addDecoration('skullCandle', -14.1, -35.8, { height: 0.68 });
-    addDecoration('skullCandle', 14.1, -48.2, { height: 0.68, rotationY: Math.PI });
-    addBrokenFloor('brokenFloorA', -3, -42, 0.3);
-    addBrokenFloor('brokenFloorB', 3, -42, -0.4);
-    addWallTorch(room, 'north', -12);
-    addWallTorch(room, 'north', 12);
-    addRoomLight(room, 0xb08bff, 1.8);
+  },
+};
+
+// ['minX'|'maxX'|'minZ'|'maxZ', offset] resolves relative to the room bounds.
+function resolveCoordinate(value, room) {
+  return Array.isArray(value) ? room[value[0]] + value[1] : value;
+}
+
+function decorateRoom(room) {
+  for (const { op: name, x, z, ...spec } of ROOM_DECORATIONS[room.id] ?? []) {
+    const operation = DECOR_OPS[name];
+    if (!operation) throw new Error(`Unknown decoration op ${name} in ${room.id}`);
+    operation(room, { ...spec, x: resolveCoordinate(x, room), z: resolveCoordinate(z, room) });
   }
 }
 
@@ -1691,6 +1624,7 @@ function buildTown() {
 }
 
 function buildWorld() {
+  buildDungeonLightPool();
   buildLighting();
   buildCrypt();
   buildChests();
@@ -1710,34 +1644,18 @@ function chestById(id) {
   return state.chests.find((chest) => chest.id === id) ?? null;
 }
 
-function containsPosition(zone, position, inset = 0) {
-  return position.x >= zone.minX + inset
-    && position.x <= zone.maxX - inset
-    && position.z >= zone.minZ + inset
-    && position.z <= zone.maxZ - inset;
-}
-
-function roomAtPosition(position, inset = 0) {
-  return MAP.rooms.find((room) => containsPosition(room, position, inset)) ?? null;
-}
-
-function zoneAtPosition(position) {
-  return roomAtPosition(position)
-    ?? MAP.corridors.find((corridor) => containsPosition(corridor, position))
-    ?? null;
-}
+// Adapters from THREE positions to the shared world-rules geometry.
+const roomAtPosition = (position, inset = 0) => findRoomAt(MAP.rooms, position.x, position.z, inset);
+const zoneAtPosition = (position) => findZoneAt(MAP.zones, position.x, position.z);
 
 function updateZoneVisibility(roomId, force = false) {
   if (!ROOM_IDS.has(roomId)) return;
-  const nextVisible = new Set([roomId]);
-  for (const neighborId of ZONE_NEIGHBORS.get(roomId) ?? []) {
-    if (!ROOM_IDS.has(neighborId)) nextVisible.add(neighborId);
-  }
-  for (const gate of state.gates) {
-    if (!gate.open) continue;
-    nextVisible.add(gate.corridorId);
-    gate.roomIds.forEach((id) => nextVisible.add(id));
-  }
+  const nextVisible = new Set(visibleZoneIdsFor({
+    currentRoomId: roomId,
+    neighborIdsByZone: ZONE_NEIGHBORS,
+    gates: state.gates,
+    isRoom: (id) => ROOM_IDS.has(id),
+  }));
   const changed = force
     || nextVisible.size !== visibleZoneIds.size
     || [...nextVisible].some((id) => !visibleZoneIds.has(id));
@@ -1747,6 +1665,9 @@ function updateZoneVisibility(roomId, force = false) {
   zoneRenderGroups.forEach((group, id) => {
     group.visible = visibleZoneIds.has(id);
   });
+  applyDungeonLights();
+  const profile = window.__cryptProfile;
+  if (profile?.active) profile.zones.push({ t: performance.now(), visible: [...visibleZoneIds] });
 }
 
 function showDialogue(npcName, copy, duration = 2400) {
@@ -1848,32 +1769,34 @@ function updateProgression() {
   }
   // Keep the gate open until the entire actor has cleared its collider rather
   // than closing on the first frame their center crosses the room boundary.
-  const room = roomAtPosition(player.root.position, ROOM_ENTRY_CLEARANCE);
-  if (!room) return;
-  const enteredNewRoom = room.id !== state.currentRoomId;
-  if (!enteredNewRoom) {
-    if (visibleZoneIds.size === 0) updateZoneVisibility(room.id, true);
+  // The enter/close decision itself lives in world-rules.resolveRoomEntry so
+  // the headless core follows the identical rule.
+  const transition = resolveRoomEntry({
+    x: player.root.position.x,
+    z: player.root.position.z,
+    rooms: MAP.rooms,
+    currentRoomId: state.currentRoomId,
+    gates: state.gates,
+    clearance: ROOM_ENTRY_CLEARANCE,
+  });
+  if (!transition.entered) {
+    if (visibleZoneIds.size === 0) updateZoneVisibility(state.currentRoomId, true);
     return;
   }
-  const previousRoomId = state.currentRoomId;
-  const traversedGate = state.gates.find((gate) => (
-    gate.open && gate.fromRoomId === previousRoomId && gate.toRoomId === room.id
-  ));
+  const traversedGate = transition.traversedGate;
   if (traversedGate) {
+    if (E2E_ENABLED) e2eState.fastGateTransitions += 1;
     traversedGate.open = false;
     traversedGate.root.visible = true;
-    // Keep both doorway frames in place. The room wall has a four-tile
-    // corridor opening; the frame sections narrow it back to the two-tile gate
-    // opening even while the gate itself is open on the other side.
-    setGateWallFrameVisible(traversedGate, previousRoomId, true);
-    setGateWallFrameVisible(traversedGate, room.id, true);
+    setGateWallFrameVisible(traversedGate, state.currentRoomId, true);
+    setGateWallFrameVisible(traversedGate, transition.roomId, true);
     traversedGate.fromRoomId = null;
     traversedGate.toRoomId = null;
   }
-  state.currentRoomId = room.id;
-  state.discoveredRooms.add(room.id);
-  areaName.textContent = room.label;
-  updateZoneVisibility(room.id, true);
+  state.currentRoomId = transition.roomId;
+  state.discoveredRooms.add(transition.roomId);
+  areaName.textContent = transition.label;
+  updateZoneVisibility(transition.roomId, true);
   if (state.started) {
     playSfx('room');
     addCameraFeedback(0.035, 1.1);
@@ -1881,52 +1804,15 @@ function updateProgression() {
   }
 }
 
-function runObjectivesComplete() {
-  return Boolean(chestById('warden-spoils')?.opened) && countLivingEnemies() === 0;
-}
-
-function isWalkable(x, z, padding = 0.55) {
-  if (state.mode === 'town') {
-    const insideTown = x >= TOWN_WORLD.minX + padding
-      && x <= TOWN_WORLD.maxX - padding
-      && z >= TOWN_WORLD.minZ + padding
-      && z <= TOWN_WORLD.maxZ - padding;
-    if (!insideTown) return false;
-    return !townStaticColliders.some((collider) => (
-      collider.root.visible
-      && x >= collider.minX - padding
-      && x <= collider.maxX + padding
-      && z >= collider.minZ - padding
-      && z <= collider.maxZ + padding
-    ));
-  }
-  const insideMap = MAP.zones.some((zone) => {
-    // Corridors overlap the room interiors by the actor clearance so their
-    // usable areas meet at each doorway instead of leaving a collision seam.
-    const clearance = corridorZones.has(zone) ? -padding : padding;
-    return x >= zone.minX + clearance
-      && x <= zone.maxX - clearance
-      && z >= zone.minZ + clearance
-      && z <= zone.maxZ - clearance;
-  });
-  if (!insideMap) return false;
-  return !staticColliders.some((collider) => (
-    collider.root.visible
-    && x >= collider.minX - padding
-    && x <= collider.maxX + padding
-    && z >= collider.minZ - padding
-    && z <= collider.maxZ + padding
-  ));
-}
-
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
-  const currentX = actor.root.position.x;
-  const currentZ = actor.root.position.z;
-  const bounds = state.mode === 'town' ? TOWN_WORLD : WORLD;
-  const nextX = THREE.MathUtils.clamp(currentX + offsetX, bounds.minX + padding, bounds.maxX - padding);
-  const nextZ = THREE.MathUtils.clamp(currentZ + offsetZ, bounds.minZ + padding, bounds.maxZ - padding);
-  if (isWalkable(nextX, currentZ, padding)) actor.root.position.x = nextX;
-  if (isWalkable(actor.root.position.x, nextZ, padding)) actor.root.position.z = nextZ;
+  stepActorWithinMap(
+    actor.root.position,
+    offsetX,
+    offsetZ,
+    navigation.modeBounds(),
+    isWalkable,
+    padding,
+  );
 }
 
 function actorFromObject(object) {
@@ -2187,18 +2073,10 @@ function createLootVisual(itemId, position) {
   return drop;
 }
 
-function lootItemForEnemy(enemy) {
-  if (enemy.profileKey === 'warden') return 'wardenRelic';
-  if (enemy.profileKey === 'support') return 'emberCharm';
-  if (enemy.profileKey === 'pulser') return 'frostRune';
-  if (enemy.profileKey === 'guard') return 'ossuaryEdge';
-  return 'healingDraft';
-}
-
 function spawnLootDrop(enemy) {
   if (enemy.lootDropped) return;
   enemy.lootDropped = true;
-  const itemId = lootItemForEnemy(enemy);
+  const itemId = lootItemForProfile(enemy.profileKey);
   createLootVisual(itemId, enemy.root.position);
   spawnCombatText(enemy.root.position, 'LOOT', ITEM_DEFS[itemId].color, enemy.height + 0.55);
 }
@@ -2277,11 +2155,26 @@ function nearestClosedGate(maxDistance = Infinity) {
   return nearest;
 }
 
+function findGate(corridorId) {
+  return state.gates.find((candidate) => candidate.corridorId === corridorId);
+}
+
+function clearEnemies(filter = () => true) {
+  for (const enemy of enemies) {
+    if (!filter(enemy)) continue;
+    enemy.dead = true;
+    enemy.root.visible = false;
+  }
+}
+
 function openGate(gate) {
-  if (!gate || gate.open || !gate.roomIds.includes(state.currentRoomId)) return;
-  const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
-  if (remainingEnemies > 0) {
-    setToast(`The gate is sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}.`, 1800);
+  const verdict = evaluateGateOpen({
+    gate,
+    currentRoomId: state.currentRoomId,
+    livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
+  });
+  if (!verdict.ok) {
+    if (verdict.reason) setToast(verdict.reason, 1800);
     return;
   }
   for (const otherGate of state.gates) {
@@ -2311,20 +2204,67 @@ function openGate(gate) {
 
 function chestBlockReason(chest) {
   if (!chest || chest.opened) return '';
-  if (chest.kind === 'seal' && livingEnemiesInBranch(chest.branch).length > 0) {
-    return `The ${chest.branch}ern seal remains warded by ${livingEnemiesInBranch(chest.branch).length} guardian${livingEnemiesInBranch(chest.branch).length === 1 ? '' : 's'}.`;
-  }
-  if (chest.kind === 'archive' && livingEnemiesInBranch('north', { includeWarden: false }).length > 0) {
-    return 'The Archive cache remains sealed while its acolytes stand.';
-  }
-  if (chest.kind === 'final' && livingEnemiesInRoom('wardenKeep').length > 0) {
-    return 'The Warden\'s reliquary is still bound to the living dead.';
-  }
-  if (chest.kind === 'cache' && livingEnemiesInRoom(chest.roomId).length > 0) {
-    return 'Clear this chamber before opening its cache.';
-  }
-  return '';
+  const guardianCount = chest.kind === 'seal'
+    ? livingEnemiesInBranch(chest.branch).length
+    : chest.kind === 'archive'
+      ? livingEnemiesInBranch('north', { includeWarden: false }).length
+      : livingEnemiesInRoom(chest.roomId).length;
+  return evaluateChestBlock({ chest, guardianCount });
 }
+
+// Objective ladder, first match wins. Each row is the full rule for one
+// stage of the delve; adding a stage is a row, not another else-if.
+const OBJECTIVE_LADDER = [
+  {
+    when: () => state.finished,
+    title: 'Delve complete',
+    detail: () => 'The crypt keeps its secrets for another day.',
+  },
+  {
+    when: () => state.failed,
+    title: 'The crypt wins',
+    detail: () => 'Take a breath, then try the route again.',
+  },
+  {
+    when: () => !state.started,
+    title: 'Enter the crypt',
+    detail: () => 'Clear the western and eastern branches to claim their seals.',
+  },
+  {
+    when: () => !state.seals.west || !state.seals.east,
+    title: 'Claim the twin branch seals',
+    detail: () => {
+      const west = state.seals.west ? 'seal claimed' : `${livingEnemiesInBranch('west').length} guardians`;
+      const east = state.seals.east ? 'seal claimed' : `${livingEnemiesInBranch('east').length} guardians`;
+      return `West: ${west}. East: ${east}. Each reliquary opens when its branch is clear.`;
+    },
+  },
+  {
+    when: () => livingEnemiesInBranch('north', { includeWarden: false }).length > 0,
+    title: 'Cross the Silent Archive',
+    detail: () => `${livingEnemiesInBranch('north', { includeWarden: false }).length} northern guardians stand between you and the Archive key.`,
+  },
+  {
+    when: () => !state.archiveKey,
+    title: 'Claim the Archive key',
+    detail: () => 'Open the cache in the Silent Archive to continue into the Warden\'s Keep.',
+  },
+  {
+    when: () => livingEnemiesInRoom('wardenKeep').length > 0,
+    title: 'Defeat the Crypt Warden',
+    detail: () => 'Dodge its slam and Soul Collapse while breaking the dead it calls back.',
+  },
+  {
+    when: () => !chestById('warden-spoils')?.opened,
+    title: 'Claim the Warden\'s spoils',
+    detail: () => 'The final reliquary is no longer warded.',
+  },
+  {
+    when: () => true,
+    title: 'Return to the entrance',
+    detail: () => `${state.openedChests} of ${state.chests.length} caches found. Return through the southern entrance.`,
+  },
+];
 
 function updateQuestUi() {
   if (state.mode === 'town') {
@@ -2335,36 +2275,20 @@ function updateQuestUi() {
   }
   const threats = countLivingEnemies();
   threatValue.textContent = `${threats} ${threats === 1 ? 'REMAINS' : 'REMAIN'}`;
-  if (state.finished) {
-    objective.textContent = 'Delve complete';
-    objectiveDetail.textContent = 'The crypt keeps its secrets for another day.';
-  } else if (state.failed) {
-    objective.textContent = 'The crypt wins';
-    objectiveDetail.textContent = 'Take a breath, then try the route again.';
-  } else if (!state.started) {
-    objective.textContent = 'Enter the crypt';
-    objectiveDetail.textContent = 'Clear the western and eastern branches to claim their seals.';
-  } else if (!state.seals.west || !state.seals.east) {
-    const west = state.seals.west ? 'seal claimed' : `${livingEnemiesInBranch('west').length} guardians`;
-    const east = state.seals.east ? 'seal claimed' : `${livingEnemiesInBranch('east').length} guardians`;
-    objective.textContent = 'Claim the twin branch seals';
-    objectiveDetail.textContent = `West: ${west}. East: ${east}. Each reliquary opens when its branch is clear.`;
-  } else if (livingEnemiesInBranch('north', { includeWarden: false }).length > 0) {
-    objective.textContent = 'Cross the Silent Archive';
-    objectiveDetail.textContent = `${livingEnemiesInBranch('north', { includeWarden: false }).length} northern guardians stand between you and the Archive key.`;
-  } else if (!state.archiveKey) {
-    objective.textContent = 'Claim the Archive key';
-    objectiveDetail.textContent = 'Open the cache in the Silent Archive to continue into the Warden\'s Keep.';
-  } else if (livingEnemiesInRoom('wardenKeep').length > 0) {
-    objective.textContent = 'Defeat the Crypt Warden';
-    objectiveDetail.textContent = 'Dodge its slam and Soul Collapse while breaking the dead it calls back.';
-  } else if (!chestById('warden-spoils')?.opened) {
-    objective.textContent = 'Claim the Warden\'s spoils';
-    objectiveDetail.textContent = 'The final reliquary is no longer warded.';
-  } else {
-    objective.textContent = 'Return to the entrance';
-    objectiveDetail.textContent = `${state.openedChests} of ${state.chests.length} caches found. Return through the southern entrance.`;
-  }
+  const stage = OBJECTIVE_LADDER.find((entry) => entry.when());
+  objective.textContent = stage.title;
+  objectiveDetail.textContent = stage.detail();
+}
+
+// One nearest-of-four scan shared by the interaction prompt and the E key
+// handler. Priority order matches the headless core: loot, chest, gate.
+function interactionCandidate() {
+  const candidates = [
+    { kind: 'loot', item: nearestLootDrop(INTERACT_RADII.loot), id: (drop) => drop.itemId },
+    { kind: 'chest', item: nearestClosedChest(INTERACT_RADII.chest), id: (chest) => chest.id },
+    { kind: 'gate', item: nearestClosedGate(INTERACT_RADII.gate), id: (gate) => gate.corridorId },
+  ];
+  return candidates.find((candidate) => candidate.item) ?? null;
 }
 
 function updateInteractionUi() {
@@ -2373,7 +2297,7 @@ function updateInteractionUi() {
     return;
   }
   if (state.mode === 'town') {
-    const nearbyNpc = nearestTownNpc(2.45);
+    const nearbyNpc = nearestTownNpc(INTERACT_RADII.npc);
     if (state.teleporting) {
       interaction.classList.remove('is-hidden');
       interaction.textContent = 'The hunter is opening the crypt path…';
@@ -2385,25 +2309,23 @@ function updateInteractionUi() {
     }
     return;
   }
-  const nearbyLoot = nearestLootDrop(1.9);
-  const nearbyChest = nearestClosedChest(2.1);
-  const nearbyGate = nearestClosedGate(2.4);
-  if (nearbyLoot) {
-    interaction.classList.remove('is-hidden');
-    interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[nearbyLoot.itemId].name.toLowerCase()}`;
-  } else if (nearbyChest) {
-    interaction.classList.remove('is-hidden');
-    interaction.innerHTML = `Press <kbd>E</kbd> to open ${nearbyChest.name.toLowerCase()}`;
-  } else if (nearbyGate) {
-    interaction.classList.remove('is-hidden');
-    const destinationId = nearbyGate.roomIds.find((id) => id !== state.currentRoomId);
+  const candidate = interactionCandidate();
+  if (!candidate) {
+    interaction.classList.add('is-hidden');
+    return;
+  }
+  interaction.classList.remove('is-hidden');
+  if (candidate.kind === 'loot') {
+    interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[candidate.item.itemId].name.toLowerCase()}`;
+  } else if (candidate.kind === 'chest') {
+    interaction.innerHTML = `Press <kbd>E</kbd> to open ${candidate.item.name.toLowerCase()}`;
+  } else {
+    const destinationId = candidate.item.roomIds.find((id) => id !== state.currentRoomId);
     const destination = ZONE_BY_ID.get(destinationId);
     const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
     interaction.innerHTML = remainingEnemies > 0
       ? `Gate sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}`
       : `Press <kbd>E</kbd> to open the way to ${(destination?.label ?? 'the next chamber').toLowerCase()}`;
-  } else {
-    interaction.classList.add('is-hidden');
   }
 }
 
@@ -2416,16 +2338,28 @@ function updateInterface(delta, force = false) {
   updateTargetUi();
   updateQuestUi();
   updateInteractionUi();
+  publishE2eSnapshot();
 }
 
+// Burst particles share one frozen geometry and draw from a pool of meshes.
+// Each particle keeps its own material so randomized lifetimes can fade
+// independently; released slots are reused, live ones never are.
+let burstGeometry = null;
+const burstMeshPool = createSlotPool(() => {
+  if (!burstGeometry) burstGeometry = new THREE.SphereGeometry(0.055, 6, 6);
+  const mesh = new THREE.Mesh(burstGeometry, new THREE.MeshBasicMaterial({ transparent: true }));
+  scene.add(mesh);
+  return mesh;
+});
+
 function spawnBurst(position, color = 0xf0c071, count = 12) {
-  const geometry = new THREE.SphereGeometry(0.055, 6, 6);
-  const material = new THREE.MeshBasicMaterial({ color, transparent: true });
   for (let index = 0; index < count; index += 1) {
-    const mesh = new THREE.Mesh(geometry, material.clone());
+    const mesh = burstMeshPool.acquire();
+    mesh.visible = true;
+    mesh.material.color.set(color);
+    mesh.material.opacity = 1;
     mesh.position.copy(position);
     mesh.position.y += 0.55;
-    scene.add(mesh);
     const angle = (index / count) * Math.PI * 2;
     effects.push({
       mesh,
@@ -2669,14 +2603,14 @@ function updateSpellProjectiles(delta) {
       spawnSpellImpact(projectile.action, impactPosition);
       if (target && !target.dead) {
         if (projectile.action === 'freeze') {
-          const damage = playerDamage(target.profileKey === 'warden' ? 7 : 10, 'freeze');
+          const damage = playerDamage(attackDamage('freeze', target.profileKey), 'freeze');
           target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
           target.attackPending = false;
           target.pendingEnemyAttack = null;
           applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
           spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
         } else {
-          const damage = playerDamage(target.profileKey === 'warden' ? 24 : 34, 'fire');
+          const damage = playerDamage(attackDamage('fire', target.profileKey), 'fire');
           applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
         }
       }
@@ -2855,18 +2789,21 @@ function updateEffects(delta) {
     effect.life -= delta;
     effect.velocity.y -= delta * 2.8;
     effect.mesh.position.addScaledVector(effect.velocity, delta);
-    effect.mesh.material.opacity = Math.max(0, effect.life);
+    effect.mesh.material.opacity = Math.min(1, Math.max(0, effect.life));
     if (effect.life <= 0) {
-      scene.remove(effect.mesh);
-      effect.mesh.geometry.dispose();
-      effect.mesh.material.dispose();
+      // Return the mesh to the pool; geometry and material stay alive.
+      effect.mesh.visible = false;
+      burstMeshPool.release(effect.mesh);
       effects.splice(index, 1);
     }
   }
 }
 
 function playerDamage(baseDamage, action) {
-  return Math.round(baseDamage * (state.playerBuffTimer > 0 ? 1.4 : 1) * itemDamageMultiplier(action));
+  return computePlayerDamage(baseDamage, {
+    buffed: state.playerBuffTimer > 0,
+    itemMultiplier: itemDamageMultiplier(action),
+  });
 }
 
 function applyEnemyDamage(target, damage, color, message) {
@@ -2900,14 +2837,15 @@ function applyPlayerAction() {
   if (!target || target.dead) return;
 
   const distance = player.root.position.distanceTo(target.root.position);
-  if (action === 'sword' && distance <= 3.45) {
-    const damage = playerDamage(target.profileKey === 'warden' ? 16 : 22, action);
+  if (distance > ACTIONS[action].range) return;
+  // Melee resolves immediately; spells fly as projectiles that apply
+  // their own impact effects on arrival (see updateSpellProjectiles).
+  if (action === 'sword') {
+    const damage = playerDamage(attackDamage('sword', target.profileKey), action);
     playSfx('sword');
     applyEnemyDamage(target, damage, 0xe9b36f, `${target.name} takes ${damage} damage.`);
-  } else if (action === 'fire' && distance <= 8.5) {
-    spawnSpellProjectile('fire', target);
-  } else if (action === 'freeze' && distance <= 8.5) {
-    spawnSpellProjectile('freeze', target);
+  } else {
+    spawnSpellProjectile(action, target);
   }
 }
 
@@ -2955,34 +2893,27 @@ function useAction(action, target = selectedTarget) {
     setToast('Vitality is already full.', 1000);
     return;
   }
+  const runtime = ACTION_RUNTIME[action];
   if (!selfAction) {
-    const range = actionDef.range;
-    if (player.root.position.distanceTo(target.root.position) > range) {
+    if (player.root.position.distanceTo(target.root.position) > actionDef.range) {
       setToast(`${target.name} is out of range.`, 1100);
       return;
     }
     state.combatStarted = true;
     state.weaponReadyTimer = 4.5;
     player.setWeaponSheathed(false);
-    player.attackLock = action === 'sword' ? 0.67 : 0.58;
-    player.attackTimer = action === 'sword' ? 0.24 : SPELL_CAST_TIMES[action];
     player.attackTarget = target;
-    player.pendingAction = action;
     player.face(target.root.position);
-    player.play(action === 'sword'
-      ? ['1h_melee_attack', 'melee_attack', 'attack']
-      : [action === 'fire' ? 'Cast_Fire' : 'Cast_Frost'], { once: true, force: true });
-    if (action !== 'sword') spawnSpellCharge(action);
-    player.attackCooldown = action === 'sword' ? 0.52 : 0.78;
+    player.play(runtime.clips ?? [runtime.castClip], { once: true, force: true });
   } else {
-    player.attackLock = action === 'heal' ? 0.62 : 0.56;
-    player.attackCooldown = 0.65;
-    player.attackTimer = SPELL_CAST_TIMES[action];
     player.attackTarget = null;
-    player.pendingAction = action;
-    player.play([action === 'heal' ? 'Cast_Heal' : 'Cast_Arcane'], { once: true, force: true });
-    spawnSpellCharge(action);
+    player.play([runtime.castClip], { once: true, force: true });
   }
+  player.attackLock = runtime.attackLock;
+  player.attackCooldown = runtime.attackCooldown;
+  player.attackTimer = runtime.attackTimer;
+  player.pendingAction = action;
+  if (runtime.spell) spawnSpellCharge(action);
   state.actionCooldowns[action] = actionCooldownFor(action);
   state.started = true;
 }
@@ -3036,10 +2967,8 @@ function updatePlayer(delta) {
       if (cameraForward.lengthSq() < 0.001) cameraForward.set(0, 0, -1);
       else cameraForward.normalize();
       cameraRight.crossVectors(cameraForward, worldUp).normalize();
-      movementDirection
-        .addScaledVector(cameraForward, forwardInput)
-        .addScaledVector(cameraRight, strafeInput)
-        .normalize();
+      const cameraRelative = cameraRelativeDirection(cameraForward, cameraRight, forwardInput, strafeInput);
+      movementDirection.set(cameraRelative.x, 0, cameraRelative.z);
       const speed = player.speed * (state.playerBuffTimer > 0 ? 1.25 : 1);
       moveActorWithinMap(player, movementDirection.x * speed * delta, movementDirection.z * speed * delta, 0.65);
       player.faceDirection(movementDirection);
@@ -3052,6 +2981,7 @@ function updatePlayer(delta) {
       player.play(['idle']);
     }
   }
+  sampleKeyboardSmokeMovement();
 }
 
 function updateWeaponState(delta) {
@@ -3481,27 +3411,17 @@ function openChest(chest) {
     colliderWidth: 1.25,
     colliderDepth: 0.9,
   });
-  state.openedChests += 1;
-  spawnBurst(chest.position, 0xf4d071, 22);
-  playSfx('chest');
-  addCameraFeedback(0.055, 0.9);
+  applyChestRewards(state, chest, Object.keys(state.actionCooldowns));
   if (chest.kind === 'seal') {
-    state.seals[chest.branch] = true;
-    state.playerHp = Math.min(state.playerMaxHp, state.playerHp + 25);
     spawnCombatText(chest.position, `${chest.branch.toUpperCase()} SEAL`, '#f2cf7c', 1.8);
     setToast(`The ${chest.branch}ern branch seal is yours.`, 2400);
   } else if (chest.kind === 'archive') {
-    state.archiveKey = true;
     spawnCombatText(chest.position, 'ARCHIVE KEY', '#c9b2f0', 1.8);
     setToast('The Archive key hums toward the Warden\'s Keep.', 2400);
   } else if (chest.kind === 'final') {
     spawnCombatText(chest.position, 'WARDEN RELIC', '#f2cf7c', 1.8);
     setToast('The Warden relic completes the delve. Return to the entrance.', 2400);
   } else {
-    state.playerHp = Math.min(state.playerMaxHp, state.playerHp + 12);
-    for (const action of Object.keys(state.actionCooldowns)) {
-      state.actionCooldowns[action] = Math.max(0, state.actionCooldowns[action] - 1.5);
-    }
     spawnCombatText(chest.position, 'RENEWED', '#9fe1bb', 1.8);
     setToast(`${chest.name} restores vitality and hastens your abilities.`);
   }
@@ -3513,22 +3433,30 @@ function openChest(chest) {
 function interact() {
   if (!state.loaded || state.finished || state.failed) return;
   if (state.mode === 'town') {
-    talkToTownNpc(nearestTownNpc(2.45));
+    const nearbyNpc = nearestTownNpc(INTERACT_RADII.npc);
+    if (nearbyNpc && !state.teleporting) {
+      state.interactionCount += 1;
+      state.lastInteraction = { kind: 'npc', id: nearbyNpc.name };
+    }
+    talkToTownNpc(nearbyNpc);
     return;
   }
   state.started = true;
-  const nearbyLoot = nearestLootDrop(1.9);
-  if (nearbyLoot) {
-    collectLootDrop(nearbyLoot);
-    return;
+  const candidate = interactionCandidate();
+  if (!candidate) return;
+  if (candidate.kind === 'loot') collectLootDrop(candidate.item);
+  else if (candidate.kind === 'chest') openChest(candidate.item);
+  else openGate(candidate.item);
+
+  const resolved = {
+    loot: () => (candidate.item.collected ? { kind: 'loot', id: candidate.item.itemId } : null),
+    chest: () => (candidate.item.opened ? { kind: 'chest', id: candidate.item.id } : null),
+    gate: () => (candidate.item.open ? { kind: 'gate', id: candidate.item.corridorId } : null),
+  }[candidate.kind]();
+  if (resolved) {
+    state.interactionCount += 1;
+    state.lastInteraction = resolved;
   }
-  const nearbyChest = nearestClosedChest(2.1);
-  if (nearbyChest) {
-    openChest(nearbyChest);
-    return;
-  }
-  const nearbyGate = nearestClosedGate(2.4);
-  if (nearbyGate) openGate(nearbyGate);
 }
 
 function finishRun(success) {
@@ -3624,7 +3552,10 @@ function animate() {
     updateWeaponState(delta);
     if (state.mode === 'dungeon') {
       updateProgression();
-      if (runObjectivesComplete() && player.root.position.distanceTo(state.exitPosition) < 2.4) {
+      if (isRunVictory({
+        objectivesComplete: runObjectivesComplete(),
+        distanceToExit: player.root.position.distanceTo(state.exitPosition),
+      })) {
         finishRun(true);
       }
       for (const enemy of enemies) {
@@ -3664,6 +3595,17 @@ function animate() {
     updateMinimap(delta);
     updateInterface(delta);
     updateTargetMarker(delta);
+  }
+  const profile = window.__cryptProfile;
+  if (profile?.active) {
+    const info = renderer.info;
+    profile.frames.push({
+      t: performance.now(),
+      calls: info.render.calls,
+      tris: info.render.triangles,
+      programs: info.programs?.length ?? 0,
+      lights: dungeonLightPool.filter((light) => light.intensity > 0).length,
+    });
   }
   renderer.render(state.mode === 'town' ? townScene : dungeonScene, camera);
 }
@@ -3718,6 +3660,8 @@ async function start() {
     setLoading(1, 'Ravenrest is awake');
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
     setToast('Find Ranger Rowan by the archery yard.');
+    window.__gameReady = true;
+    publishE2eSnapshot(true);
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
@@ -3727,3 +3671,308 @@ async function start() {
 
 animate();
 start();
+
+// --- Profiling instrumentation (opt in through __cryptRun) ---
+window.__cryptProfile = null;
+window.__cryptDone = false;
+window.__cryptError = null;
+window.__cryptMark = (label) => {
+  const profile = window.__cryptProfile;
+  if (profile?.active) profile.marks.push({ t: performance.now(), label });
+};
+
+window.__cryptRun = async (instant = false) => {
+  const profile = window.__cryptProfile ??= createCryptProfile();
+  profile.frames.length = 0;
+  profile.zones.length = 0;
+  profile.marks.length = 0;
+  profile.active = true;
+  window.__cryptDone = false;
+  window.__cryptError = null;
+  const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const walkTo = (x, z, timeoutMs = 20000) => waitForProfileTarget({
+    x,
+    z,
+    setTarget: (target) => { window.__cryptWalkTarget = target; },
+    getPosition: () => player.root.position,
+    wait,
+    timeoutMs,
+  });
+  const clearProfileRoom = () => clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
+  const openProfileGate = async (corridorId) => {
+    const gate = findGate(corridorId);
+    if (!gate) throw new Error(`Profile route has no gate for ${corridorId}.`);
+    if (gate.open) return;
+    await walkTo(gate.position.x, gate.position.z);
+    clearProfileRoom();
+    openGate(gate);
+    if (!gate.open) throw new Error(`Profile route could not open ${corridorId}.`);
+    await wait(100);
+  };
+  try {
+    window.__cryptMark('route:start');
+    if (!instant) {
+      const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
+      if (!rowan) throw new Error('Profile route could not find Ranger Rowan.');
+      await walkTo(rowan.root.position.x, rowan.root.position.z);
+      window.__cryptMark('town:at-rowan');
+      talkToTownNpc(rowan);
+      await wait(1400);
+      if (state.mode !== 'dungeon') throw new Error('Profile route did not enter the dungeon.');
+    } else {
+      enterDungeon();
+      await wait(400);
+    }
+    window.__cryptMark('dungeon:entered');
+    // Entrance -> hub.
+    await openProfileGate('entry-corridor');
+    await walkTo(0, 12.5);
+    window.__cryptMark('room:hub');
+    await wait(1200); // let hub lights/shaders settle
+    // West branch: gate corridor -> gate room -> burial -> ossuary.
+    await openProfileGate('west-corridor');
+    await walkTo(-26, 9);
+    window.__cryptMark('room:westGate');
+    await wait(800);
+    await openProfileGate('west-deep-corridor');
+    await walkTo(-47, 9);
+    window.__cryptMark('room:westBurial');
+    await openProfileGate('west-drop');
+    await walkTo(-47, -6);
+    window.__cryptMark('room:westOssuary');
+    await wait(800);
+    // Return to hub, cross east.
+    await walkTo(-47, 9);
+    await openProfileGate('west-deep-corridor');
+    await walkTo(-26, 9);
+    await openProfileGate('west-corridor');
+    await walkTo(0, 12.5);
+    await openProfileGate('east-corridor');
+    await walkTo(26, 9);
+    window.__cryptMark('room:eastGate');
+    await wait(800);
+    await openProfileGate('east-deep-corridor');
+    await walkTo(47, 9);
+    window.__cryptMark('room:eastFlooded');
+    await openProfileGate('east-drop');
+    await walkTo(47, -6);
+    window.__cryptMark('room:eastReliquary');
+  } catch (error) {
+    window.__cryptError = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    profile.active = false;
+    window.__cryptDone = true;
+    window.__cryptWalkTarget = null;
+  }
+};
+
+// Auto-walk hook: when a profile target exists, inject movement toward it.
+// Test-only: production keeps the unpatched updatePlayer.
+if (E2E_ENABLED) {
+  const originalUpdate = updatePlayer;
+  updatePlayer = function patchedUpdatePlayer(delta) {
+    const target = window.__cryptWalkTarget;
+    if (target && player && !player.dead && player.attackLock <= 0) {
+      movementDirection.set(target.x - player.root.position.x, 0, target.z - player.root.position.z);
+      const distance = movementDirection.length();
+      if (distance > 0.25) {
+        movementDirection.normalize();
+        moveActorWithinMap(player, movementDirection.x * player.speed * delta * 1.15, movementDirection.z * player.speed * delta * 1.15, 0.65);
+        player.faceDirection(movementDirection);
+        player.play(['running', 'walking']);
+        state.started = true;
+        state.combatStarted = true;
+        sampleKeyboardSmokeMovement();
+        return;
+      }
+    }
+    originalUpdate(delta);
+  };
+}
+// --- Fast functional-checkpoint surface (opt in through ?e2e) ---
+// Not a performance instrument: it bypasses animation time. Use __cryptRun
+// for any timing/frame measurement.
+if (E2E_ENABLED) {
+  const placeAt = (x, z) => {
+    if (!player) throw new Error('World not built yet.');
+    player.root.position.x = x;
+    player.root.position.z = z;
+    updateProgression();
+    publishE2eSnapshot(true);
+  };
+  const clearAllEnemies = () => clearEnemies();
+  const openFastGate = (corridorId) => {
+    const gate = findGate(corridorId);
+    if (!gate) throw new Error(`No gate for ${corridorId}.`);
+    openGate(gate);
+    if (!gate.open) throw new Error(`Fast route could not open ${corridorId}.`);
+  };
+  const interactChestAt = (id, x, z) => {
+    placeAt(x, z);
+    const chest = chestById(id);
+    if (!chest) throw new Error(`Fast route has no chest for ${id}.`);
+    interact();
+    if (!chest.opened) throw new Error(`Fast route could not open ${id}.`);
+  };
+  const runFastCheckpoint = async () => {
+    const startedAt = performance.now();
+    e2eState.fastGateTransitions = 0;
+    try {
+      enterDungeon();
+      state.started = true;
+      clearAllEnemies();
+      createLootVisual('healingDraft', player.root.position);
+      interact();
+
+      placeAt(0, 26.8);
+      openFastGate('entry-corridor');
+      placeAt(0, 12);
+      interactChestAt('hub-cache', 0, 14.2);
+
+      openFastGate('west-corridor');
+      placeAt(-26, 9);
+      openFastGate('west-deep-corridor');
+      placeAt(-47, 9);
+      interactChestAt('ashen-cache', -47, 10);
+      openFastGate('west-drop');
+      interactChestAt('west-seal', -47, -13);
+
+      placeAt(0, 12);
+      openFastGate('east-corridor');
+      placeAt(26, 9);
+      openFastGate('east-deep-corridor');
+      placeAt(47, 9);
+      interactChestAt('drowned-cache', 47, 10);
+      openFastGate('east-drop');
+      interactChestAt('east-seal', 47, -12.5);
+
+      placeAt(0, 12);
+      openFastGate('north-corridor');
+      placeAt(0, -10);
+      openFastGate('archive-corridor');
+      placeAt(0, -24);
+      interactChestAt('archive-key', 0, -27);
+      openFastGate('warden-corridor');
+      placeAt(0, -42);
+      interactChestAt('warden-spoils', 0, -47.5);
+      // Use the real southern exit and let the animation loop invoke the
+      // production completion condition after objectives are complete.
+      placeAt(0, 32.4);
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      const snapshot = e2eSnapshot();
+      const requiredChestIds = ['west-seal', 'east-seal', 'archive-key', 'warden-spoils'];
+      const assertions = {
+        finished: snapshot.finished && !snapshot.failed,
+        seals: snapshot.seals.west && snapshot.seals.east,
+        archiveKey: snapshot.archiveKey,
+        requiredChests: requiredChestIds.every((id) => snapshot.chests.find((chest) => chest.id === id)?.opened),
+        lootCollected: snapshot.loot.some((drop) => drop.collected),
+        interacted: snapshot.interactionCount >= requiredChestIds.length + 4,
+        gateTraversal: e2eState.fastGateTransitions === state.gates.length,
+        objectives: snapshot.objectives.complete,
+      };
+      setE2eResult({
+        kind: 'fast-functional-checkpoint',
+        pass: Object.values(assertions).every(Boolean),
+        durationMs: Math.round(performance.now() - startedAt),
+        assertions,
+        snapshot,
+      });
+    } catch (error) {
+      setE2eResult({
+        kind: 'fast-functional-checkpoint',
+        pass: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        error: error instanceof Error ? error.message : String(error),
+        snapshot: e2eSnapshot(),
+      });
+    }
+  };
+  const startKeyboardSmoke = () => {
+    const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
+    if (rowan) player.root.position.copy(rowan.root.position);
+    state.lastInteraction = null;
+    camera.getWorldDirection(cameraForward);
+    cameraForward.y = 0;
+    cameraForward.normalize();
+    e2eState.smoke = {
+      startedAt: performance.now(),
+      cameraForward: { x: cameraForward.x, z: cameraForward.z },
+      interactionBefore: state.interactionCount,
+      lastInteractionBefore: state.lastInteraction,
+      errorsBefore: e2eState.errors.length,
+      sampleMode: state.mode,
+      sample: { x: player.root.position.x, z: player.root.position.z },
+      pathDistance: 0,
+      forwardTravel: 0,
+    };
+    setE2eResult(null);
+  };
+  const finishKeyboardSmoke = () => {
+    const smoke = e2eState.smoke;
+    if (!smoke) {
+      setE2eResult({ kind: 'keyboard-smoke', pass: false, error: 'Smoke was not started.' });
+      return;
+    }
+    const distance = smoke.pathDistance;
+    const forwardDot = distance > 0.001 ? smoke.forwardTravel / distance : 0;
+    const assertions = {
+      cameraRelativeW: distance > 0.1 && forwardDot > 0.55,
+      interacted: state.interactionCount > smoke.interactionBefore
+        && state.lastInteraction !== smoke.lastInteractionBefore
+        && state.lastInteraction?.kind === 'npc',
+      windowRuntimeErrors: e2eState.errors.length === smoke.errorsBefore,
+    };
+    setE2eResult({
+      kind: 'keyboard-smoke',
+      pass: Object.values(assertions).every(Boolean),
+      durationMs: Math.round(performance.now() - smoke.startedAt),
+      assertions,
+      errorSources: ['window.error', 'unhandledrejection'],
+      movement: { distance, forwardDot },
+      snapshot: e2eSnapshot(),
+    });
+  };
+
+  const controls = document.createElement('section');
+  controls.id = 'e2e-controls';
+  controls.setAttribute('aria-label', 'Browser validation controls');
+  controls.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;display:flex;gap:4px;';
+  const addCommand = (command, label, handler) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.e2eCommand = command;
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      try {
+        handler();
+      } catch (error) {
+        setE2eResult({ kind: command, pass: false, error: error instanceof Error ? error.message : String(error), snapshot: e2eSnapshot() });
+      }
+      publishE2eSnapshot(true);
+    });
+    controls.append(button);
+  };
+  addCommand('smoke-start', 'Start keyboard smoke', startKeyboardSmoke);
+  addCommand('smoke-finish', 'Finish keyboard smoke', finishKeyboardSmoke);
+  addCommand('fast-checkpoint', 'Run fast checkpoint', runFastCheckpoint);
+  app.append(controls);
+
+  window.__cryptTest = {
+    snapshot: e2eSnapshot,
+    enterDungeon,
+    placeAt,
+    clearRoom() {
+      if (!player) throw new Error('World not built yet.');
+      clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
+    },
+    openGateById(corridorId) {
+      const gate = findGate(corridorId);
+      if (!gate) throw new Error(`No gate for ${corridorId}.`);
+      openGate(gate);
+      return gate.open;
+    },
+  };
+}

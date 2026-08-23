@@ -1,0 +1,188 @@
+// Pure gameplay rules shared by the rendered game (src/main.js) and the
+// headless simulation (src/game/game-core.js). No THREE, no DOM, no timers:
+// callers pass in plain data and counts, these functions return decisions.
+// Keeping one definition here is what guarantees the headless run exercises
+// the same rules as the rendered game.
+
+export const EXIT_POSITION = { x: 0, z: 32.4 };
+export const EXIT_RADIUS = 2.4;
+export const HEAL_FRACTION = 0.3;
+export const CONSUMABLE_HEAL = 30;
+
+// Interaction reach per target kind, shared so both surfaces agree.
+export const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
+
+// --- Gates ---------------------------------------------------------------
+
+// A gate opens only from one of its two rooms and only once that room holds
+// no living guardians. `code` is the machine-readable outcome for agents and
+// events; `message` is optional display prose for the rendered toast layer.
+export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
+  if (!gate || gate.open) return { ok: false, code: 'unavailable', message: '' };
+  if (!gate.roomIds.includes(currentRoomId)) return { ok: false, code: 'wrong-room', message: '' };
+  if (livingInRoomCount > 0) {
+    return {
+      ok: false,
+      code: 'warded',
+      message: `The gate is sealed by ${livingInRoomCount} remaining guardian${livingInRoomCount === 1 ? '' : 's'}.`,
+    };
+  }
+  return { ok: true, code: 'opened', message: '' };
+}
+
+// --- Chests --------------------------------------------------------------
+
+// The single place that maps a chest kind onto its warding population and
+// its blocked message. Callers hand in two population resolvers; every kind
+// dispatch lives here so main.js and game-core cannot drift.
+export function evaluateChestBlock({ chest, branchGuardians, roomGuardians }) {
+  if (!chest || chest.opened) return '';
+  if (chest.kind === 'seal') {
+    const count = branchGuardians(chest.branch);
+    if (count > 0) {
+      return `The ${chest.branch}ern seal remains warded by ${count} guardian${count === 1 ? '' : 's'}.`;
+    }
+  }
+  if (chest.kind === 'archive' && branchGuardians('north', { includeWarden: false }) > 0) {
+    return 'The Archive cache remains sealed while its acolytes stand.';
+  }
+  if ((chest.kind === 'final' || chest.kind === 'cache') && roomGuardians(chest.roomId) > 0) {
+    return chest.kind === 'final'
+      ? 'The Warden\'s reliquary is still bound to the living dead.'
+      : 'Clear this chamber before opening its cache.';
+  }
+  return '';
+}
+
+// Mutates plain progression state exactly as openChest() does; returns a
+// summary so callers can layer presentation (text/audio/effects) on top.
+export function applyChestRewards(stateLike, chest, actionKeys) {
+  stateLike.openedChests += 1;
+  const summary = { kind: chest.kind ?? 'cache', healed: 0, cooldownRefresh: 0 };
+  if (chest.kind === 'seal') {
+    stateLike.seals[chest.branch] = true;
+    summary.healed = 25;
+  } else if (chest.kind === 'archive') {
+    stateLike.archiveKey = true;
+  } else if (chest.kind === 'final') {
+    // The relic itself grants nothing; it enables the return to the exit.
+  } else {
+    summary.healed = 12;
+    summary.cooldownRefresh = 1.5;
+  }
+  if (summary.healed > 0) {
+    stateLike.playerHp = Math.min(stateLike.playerMaxHp, stateLike.playerHp + summary.healed);
+  }
+  if (summary.cooldownRefresh > 0) {
+    for (const action of actionKeys) {
+      stateLike.actionCooldowns[action] = Math.max(0, stateLike.actionCooldowns[action] - summary.cooldownRefresh);
+    }
+  }
+  return summary;
+}
+
+// --- Loot ----------------------------------------------------------------
+
+export function lootItemForProfile(profileKey) {
+  if (profileKey === 'warden') return 'wardenRelic';
+  if (profileKey === 'support') return 'emberCharm';
+  if (profileKey === 'pulser') return 'frostRune';
+  if (profileKey === 'guard') return 'ossuaryEdge';
+  return 'healingDraft';
+}
+
+// --- World geometry -------------------------------------------------------
+
+// Geometric zone adjacency used at build time by the rendered game and on
+// every run by the headless core. Zones are neighbors when their bounds
+// overlap on both axes past a small epsilon.
+export function computeZoneNeighbors(zones) {
+  return new Map(zones.map((zone) => {
+    const neighbors = zones
+      .filter((candidate) => candidate !== zone)
+      .filter((candidate) => {
+        const overlapX = Math.min(zone.maxX, candidate.maxX) - Math.max(zone.minX, candidate.minX);
+        const overlapZ = Math.min(zone.maxZ, candidate.maxZ) - Math.max(zone.minZ, candidate.minZ);
+        return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
+      })
+      .map((candidate) => candidate.id);
+    return [zone.id, neighbors];
+  }));
+}
+
+export function playerDamage(baseDamage, { buffed = false, itemMultiplier = 1 } = {}) {
+  return Math.round(baseDamage * (buffed ? 1.4 : 1) * itemMultiplier);
+}
+
+// Base damage per action/target mirroring applyPlayerAction() and the spell
+// impact rules. `warden` targets take reduced damage.
+export function attackDamage(action, targetProfileKey) {
+  const warden = targetProfileKey === 'warden';
+  switch (action) {
+    case 'sword': return warden ? 16 : 22;
+    case 'fire': return warden ? 24 : 34;
+    case 'freeze': return warden ? 7 : 10;
+    default: return 0;
+  }
+}
+
+// --- Run objectives / win condition --------------------------------------
+
+export function runObjectivesComplete({ wardenSpoilsOpened, livingEnemyCount }) {
+  return Boolean(wardenSpoilsOpened) && livingEnemyCount === 0;
+}
+
+// --- Zone geometry ---------------------------------------------------------
+
+export function zoneContains(zone, x, z, inset = 0) {
+  return x >= zone.minX + inset && x <= zone.maxX - inset
+    && z >= zone.minZ + inset && z <= zone.maxZ - inset;
+}
+
+// `zones` must be ordered rooms-before-corridors so room priority is
+// preserved when scanning.
+export function findRoomAt(rooms, x, z, inset = 0) {
+  return rooms.find((room) => zoneContains(room, x, z, inset)) ?? null;
+}
+
+export function findZoneAt(zones, x, z) {
+  return zones.find((zone) => zoneContains(zone, x, z)) ?? null;
+}
+
+// --- Zone visibility / room transitions -----------------------------------
+
+// Zones currently rendered/active for a room: the room itself plus its
+// non-room neighbors, plus every open gate and the rooms it connects.
+export function visibleZoneIdsFor({ currentRoomId, neighborIdsByZone, gates, isRoom }) {
+  const visible = new Set([currentRoomId]);
+  for (const neighborId of neighborIdsByZone.get(currentRoomId) ?? []) {
+    if (!isRoom(neighborId)) visible.add(neighborId);
+  }
+  for (const gate of gates) {
+    if (!gate.open) continue;
+    visible.add(gate.corridorId);
+    gate.roomIds.forEach((id) => visible.add(id));
+  }
+  return [...visible];
+}
+
+// Pure room-transition decision used by updateProgression() on both sides.
+// Returns which room (if any) the actor fully entered at (x, z) given the
+// entry clearance, and which traversed gate should close as a consequence.
+export function resolveRoomEntry({ x, z, rooms, currentRoomId, gates, clearance = 0 }) {
+  const room = findRoomAt(rooms, x, z, clearance);
+  if (!room || room.id === currentRoomId) return { entered: false };
+  return {
+    entered: true,
+    roomId: room.id,
+    label: room.label ?? null,
+    traversedGate: gates.find((gate) => (
+      gate.open && gate.fromRoomId === currentRoomId && gate.toRoomId === room.id
+    )) ?? null,
+  };
+}
+
+
+export function isRunVictory({ objectivesComplete, distanceToExit }) {
+  return objectivesComplete && distanceToExit < EXIT_RADIUS;
+}
