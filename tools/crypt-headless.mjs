@@ -6,6 +6,10 @@
 // frame-rate dependence. Fully deterministic: the same commands always
 // produce the same run.
 //
+// One deliberate shortcut: ordinary rooms are cleared with clearRoom(), an
+// accelerated test affordance that stands in for room combat. The warden
+// itself is fought through semantic useAction() calls.
+//
 // Usage:
 //   node tools/crypt-headless.mjs [--quiet]
 

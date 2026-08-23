@@ -104,7 +104,7 @@ test('checkpoints restore an identical mid-run state', () => {
   core.moveTo(-26, 9);
   const checkpoint = core.saveCheckpoint();
 
-  const restored = createGameCore({ seed: 99 });
+  const restored = createGameCore();
   restored.startNewGame();
   restored.loadCheckpoint(checkpoint);
 
@@ -115,7 +115,7 @@ test('checkpoints restore an identical mid-run state', () => {
   assert.equal(restored.openGate('west-deep-corridor').ok, true);
 });
 
-test('full delve: New Game to victory using only semantic actions', () => {
+test('full delve: New Game to victory via semantic actions (clearRoom as accelerated combat)', () => {
   const core = freshCore();
   enterDungeon(core); // talkTo('Hunter') + tick
   const open = (corridorId) => {
