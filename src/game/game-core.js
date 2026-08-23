@@ -24,6 +24,8 @@ import {
   attackDamage,
   computeZoneNeighbors,
   evaluateChestBlock,
+  findRoomAt,
+  findZoneAt,
   evaluateGateOpen,
   INTERACT_RADII,
   isRunVictory,
@@ -150,16 +152,8 @@ export function createGameCore({
   }
   const livingEnemyCount = () => state.enemies.filter((enemy) => !enemy.dead).length;
 
-  function containsPosition(zone, x, z, inset = 0) {
-    return x >= zone.minX + inset && x <= zone.maxX - inset
-      && z >= zone.minZ + inset && z <= zone.maxZ - inset;
-  }
-  const roomAtPosition = (x, z, inset = 0) => map.rooms.find(
-    (room) => containsPosition(room, x, z, inset),
-  ) ?? null;
-  const zoneAtPosition = (x, z) => roomAtPosition(x, z)
-    ?? map.corridors.find((corridor) => containsPosition(corridor, x, z))
-    ?? null;
+  const roomAtPosition = (x, z, inset = 0) => findRoomAt(map.rooms, x, z, inset);
+  const zoneAtPosition = (x, z) => findZoneAt(zones, x, z);
 
   function isWalkable(x, z, padding = 0.55) {
     return isWalkablePoint({ x, z, padding, navigation });

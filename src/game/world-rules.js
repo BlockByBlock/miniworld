@@ -132,6 +132,23 @@ export function runObjectivesComplete({ wardenSpoilsOpened, livingEnemyCount }) 
   return Boolean(wardenSpoilsOpened) && livingEnemyCount === 0;
 }
 
+// --- Zone geometry ---------------------------------------------------------
+
+export function zoneContains(zone, x, z, inset = 0) {
+  return x >= zone.minX + inset && x <= zone.maxX - inset
+    && z >= zone.minZ + inset && z <= zone.maxZ - inset;
+}
+
+// `zones` must be ordered rooms-before-corridors so room priority is
+// preserved when scanning.
+export function findRoomAt(rooms, x, z, inset = 0) {
+  return rooms.find((room) => zoneContains(room, x, z, inset)) ?? null;
+}
+
+export function findZoneAt(zones, x, z) {
+  return zones.find((zone) => zoneContains(zone, x, z)) ?? null;
+}
+
 // --- Zone visibility / room transitions -----------------------------------
 
 // Zones currently rendered/active for a room: the room itself plus its
@@ -153,10 +170,7 @@ export function visibleZoneIdsFor({ currentRoomId, neighborIdsByZone, gates, isR
 // Returns which room (if any) the actor fully entered at (x, z) given the
 // entry clearance, and which traversed gate should close as a consequence.
 export function resolveRoomEntry({ x, z, rooms, currentRoomId, gates, clearance = 0 }) {
-  const room = rooms.find((candidate) => (
-    x >= candidate.minX + clearance && x <= candidate.maxX - clearance
-    && z >= candidate.minZ + clearance && z <= candidate.maxZ - clearance
-  )) ?? null;
+  const room = findRoomAt(rooms, x, z, clearance);
   if (!room || room.id === currentRoomId) return { entered: false };
   return {
     entered: true,

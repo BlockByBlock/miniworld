@@ -29,6 +29,8 @@ import {
   computeZoneNeighbors,
   evaluateChestBlock,
   evaluateGateOpen,
+  findRoomAt,
+  findZoneAt,
   isRunVictory,
   lootItemForProfile,
   playerDamage as computePlayerDamage,
@@ -1646,22 +1648,9 @@ function chestById(id) {
   return state.chests.find((chest) => chest.id === id) ?? null;
 }
 
-function containsPosition(zone, position, inset = 0) {
-  return position.x >= zone.minX + inset
-    && position.x <= zone.maxX - inset
-    && position.z >= zone.minZ + inset
-    && position.z <= zone.maxZ - inset;
-}
-
-function roomAtPosition(position, inset = 0) {
-  return MAP.rooms.find((room) => containsPosition(room, position, inset)) ?? null;
-}
-
-function zoneAtPosition(position) {
-  return roomAtPosition(position)
-    ?? MAP.corridors.find((corridor) => containsPosition(corridor, position))
-    ?? null;
-}
+// Adapters from THREE positions to the shared world-rules geometry.
+const roomAtPosition = (position, inset = 0) => findRoomAt(MAP.rooms, position.x, position.z, inset);
+const zoneAtPosition = (position) => findZoneAt(MAP.zones, position.x, position.z);
 
 function updateZoneVisibility(roomId, force = false) {
   if (!ROOM_IDS.has(roomId)) return;
