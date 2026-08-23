@@ -1,0 +1,118 @@
+// Pure gameplay rules shared by the rendered game (src/main.js) and the
+// headless simulation (src/game/game-core.js). No THREE, no DOM, no timers:
+// callers pass in plain data and counts, these functions return decisions.
+// Keeping one definition here is what guarantees the headless run exercises
+// the same rules as the rendered game.
+
+export const EXIT_POSITION = { x: 0, z: 32.4 };
+export const EXIT_RADIUS = 2.4;
+export const HEAL_FRACTION = 0.3;
+
+// --- Gates ---------------------------------------------------------------
+
+// Mirrors openGate(): a gate opens only from one of its two rooms and only
+// once that room holds no living guardians.
+export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
+  if (!gate || gate.open) return { ok: false, reason: 'missing-or-open' };
+  if (!gate.roomIds.includes(currentRoomId)) return { ok: false, reason: 'not-in-room' };
+  if (livingInRoomCount > 0) {
+    return {
+      ok: false,
+      reason: `The gate is sealed by ${livingInRoomCount} remaining guardian${livingInRoomCount === 1 ? '' : 's'}.`,
+    };
+  }
+  return { ok: true, reason: '' };
+}
+
+// --- Chests --------------------------------------------------------------
+
+// Mirrors chestBlockReason(): callers resolve the relevant living-enemy
+// counts for the chest kind before asking.
+export function evaluateChestBlock({
+  chest,
+  branchGuardianCount = 0,
+  roomGuardianCount = 0,
+}) {
+  if (!chest || chest.opened) return '';
+  if (chest.kind === 'seal' && branchGuardianCount > 0) {
+    return `The ${chest.branch}ern seal remains warded by ${branchGuardianCount} guardian${branchGuardianCount === 1 ? '' : 's'}.`;
+  }
+  if (chest.kind === 'archive' && branchGuardianCount > 0) {
+    return 'The Archive cache remains sealed while its acolytes stand.';
+  }
+  if ((chest.kind === 'final' || chest.kind === 'cache') && roomGuardianCount > 0) {
+    return chest.kind === 'final'
+      ? 'The Warden\'s reliquary is still bound to the living dead.'
+      : 'Clear this chamber before opening its cache.';
+  }
+  return '';
+}
+
+// Mutates plain progression state exactly as openChest() does; returns a
+// summary so callers can layer presentation (text/audio/effects) on top.
+export function applyChestRewards(stateLike, chest, actionKeys) {
+  stateLike.openedChests += 1;
+  const summary = { kind: chest.kind ?? 'cache', healed: 0, cooldownRefresh: 0 };
+  if (chest.kind === 'seal') {
+    stateLike.seals[chest.branch] = true;
+    summary.healed = 25;
+  } else if (chest.kind === 'archive') {
+    stateLike.archiveKey = true;
+  } else if (chest.kind === 'final') {
+    // The relic itself grants nothing; it enables the return to the exit.
+  } else {
+    summary.healed = 12;
+    summary.cooldownRefresh = 1.5;
+  }
+  if (summary.healed > 0) {
+    stateLike.playerHp = Math.min(stateLike.playerMaxHp, stateLike.playerHp + summary.healed);
+  }
+  if (summary.cooldownRefresh > 0) {
+    for (const action of actionKeys) {
+      stateLike.actionCooldowns[action] = Math.max(0, stateLike.actionCooldowns[action] - summary.cooldownRefresh);
+    }
+  }
+  return summary;
+}
+
+// --- Loot ----------------------------------------------------------------
+
+export function lootItemForProfile(profileKey) {
+  if (profileKey === 'warden') return 'wardenRelic';
+  if (profileKey === 'support') return 'emberCharm';
+  if (profileKey === 'pulser') return 'frostRune';
+  if (profileKey === 'guard') return 'ossuaryEdge';
+  return 'healingDraft';
+}
+
+// --- Combat math ---------------------------------------------------------
+
+export function playerDamage(baseDamage, action, { buffed = false, itemMultiplier = 1 } = {}) {
+  return Math.round(baseDamage * (buffed ? 1.4 : 1) * itemMultiplier);
+}
+
+// Base damage per action/target mirroring applyPlayerAction() and the spell
+// impact rules. `warden` targets take reduced damage.
+export function attackDamage(action, targetProfileKey) {
+  const warden = targetProfileKey === 'warden';
+  switch (action) {
+    case 'sword': return warden ? 16 : 22;
+    case 'fire': return warden ? 24 : 34;
+    case 'freeze': return warden ? 7 : 10;
+    default: return 0;
+  }
+}
+
+export function attackRange(action, ranges) {
+  return ranges?.[action];
+}
+
+// --- Run objectives / win condition --------------------------------------
+
+export function runObjectivesComplete({ wardenSpoilsOpened, livingEnemyCount }) {
+  return Boolean(wardenSpoilsOpened) && livingEnemyCount === 0;
+}
+
+export function isRunVictory({ objectivesComplete, distanceToExit }) {
+  return objectivesComplete && distanceToExit < EXIT_RADIUS;
+}

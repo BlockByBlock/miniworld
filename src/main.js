@@ -18,6 +18,18 @@ import {
   stepActorWithinMap,
 } from './movement-contracts.js';
 import { WORLD_DATA } from './world-data.js';
+import {
+  EXIT_POSITION,
+  EXIT_RADIUS,
+  applyChestRewards,
+  attackDamage,
+  evaluateChestBlock,
+  evaluateGateOpen,
+  isRunVictory,
+  lootItemForProfile,
+  playerDamage as computePlayerDamage,
+  runObjectivesComplete as evaluateObjectivesComplete,
+} from './game/world-rules.js';
 import './style.css';
 
 const $ = (selector) => document.querySelector(selector);
@@ -147,7 +159,7 @@ const state = {
   cameraOffset: new THREE.Vector3(),
   // The player uses (x, y, z) with y fixed at ground level; the southern exit
   // is in the entrance room at z=32.4.
-  exitPosition: new THREE.Vector3(0, 0, 32.4),
+  exitPosition: new THREE.Vector3(EXIT_POSITION.x, 0, EXIT_POSITION.z),
   elapsed: 0,
   uiTimer: 0,
   overlayTimer: 0,
@@ -2052,7 +2064,10 @@ function updateProgression() {
 }
 
 function runObjectivesComplete() {
-  return Boolean(chestById('warden-spoils')?.opened) && countLivingEnemies() === 0;
+  return evaluateObjectivesComplete({
+    wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
+    livingEnemyCount: countLivingEnemies(),
+  });
 }
 
 function isWalkable(x, z, padding = 0.55) {
@@ -2329,11 +2344,7 @@ function createLootVisual(itemId, position) {
 }
 
 function lootItemForEnemy(enemy) {
-  if (enemy.profileKey === 'warden') return 'wardenRelic';
-  if (enemy.profileKey === 'support') return 'emberCharm';
-  if (enemy.profileKey === 'pulser') return 'frostRune';
-  if (enemy.profileKey === 'guard') return 'ossuaryEdge';
-  return 'healingDraft';
+  return lootItemForProfile(enemy.profileKey);
 }
 
 function spawnLootDrop(enemy) {
@@ -2431,10 +2442,13 @@ function clearEnemies(filter = () => true) {
 }
 
 function openGate(gate) {
-  if (!gate || gate.open || !gate.roomIds.includes(state.currentRoomId)) return;
-  const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
-  if (remainingEnemies > 0) {
-    setToast(`The gate is sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}.`, 1800);
+  const verdict = evaluateGateOpen({
+    gate,
+    currentRoomId: state.currentRoomId,
+    livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
+  });
+  if (!verdict.ok) {
+    if (verdict.reason.startsWith('The gate is sealed')) setToast(verdict.reason, 1800);
     return;
   }
   for (const otherGate of state.gates) {
@@ -2464,22 +2478,12 @@ function openGate(gate) {
 
 function chestBlockReason(chest) {
   if (!chest || chest.opened) return '';
-  if (chest.kind === 'seal') {
-    const guardians = livingEnemiesInBranch(chest.branch).length;
-    if (guardians > 0) {
-      return `The ${chest.branch}ern seal remains warded by ${guardians} guardian${guardians === 1 ? '' : 's'}.`;
-    }
-  }
-  if (chest.kind === 'archive' && livingEnemiesInBranch('north', { includeWarden: false }).length > 0) {
-    return 'The Archive cache remains sealed while its acolytes stand.';
-  }
-  if (chest.kind === 'final' && livingEnemiesInRoom('wardenKeep').length > 0) {
-    return 'The Warden\'s reliquary is still bound to the living dead.';
-  }
-  if (chest.kind === 'cache' && livingEnemiesInRoom(chest.roomId).length > 0) {
-    return 'Clear this chamber before opening its cache.';
-  }
-  return '';
+  const countArgs = chest.kind === 'seal'
+    ? { branchGuardianCount: livingEnemiesInBranch(chest.branch).length }
+    : chest.kind === 'archive'
+      ? { branchGuardianCount: livingEnemiesInBranch('north', { includeWarden: false }).length }
+      : { roomGuardianCount: livingEnemiesInRoom(chest.roomId).length };
+  return evaluateChestBlock({ chest, ...countArgs });
 }
 
 function updateQuestUi() {
@@ -2837,14 +2841,14 @@ function updateSpellProjectiles(delta) {
       spawnSpellImpact(projectile.action, impactPosition);
       if (target && !target.dead) {
         if (projectile.action === 'freeze') {
-          const damage = playerDamage(target.profileKey === 'warden' ? 7 : 10, 'freeze');
+          const damage = playerDamage(attackDamage('freeze', target.profileKey), 'freeze');
           target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
           target.attackPending = false;
           target.pendingEnemyAttack = null;
           applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
           spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
         } else {
-          const damage = playerDamage(target.profileKey === 'warden' ? 24 : 34, 'fire');
+          const damage = playerDamage(attackDamage('fire', target.profileKey), 'fire');
           applyEnemyDamage(target, damage, 0xf27e68, `${target.name} burns for ${damage}.`);
         }
       }
@@ -3034,7 +3038,10 @@ function updateEffects(delta) {
 }
 
 function playerDamage(baseDamage, action) {
-  return Math.round(baseDamage * (state.playerBuffTimer > 0 ? 1.4 : 1) * itemDamageMultiplier(action));
+  return computePlayerDamage(baseDamage, action, {
+    buffed: state.playerBuffTimer > 0,
+    itemMultiplier: itemDamageMultiplier(action),
+  });
 }
 
 function applyEnemyDamage(target, damage, color, message) {
@@ -3069,7 +3076,7 @@ function applyPlayerAction() {
 
   const distance = player.root.position.distanceTo(target.root.position);
   if (action === 'sword' && distance <= 3.45) {
-    const damage = playerDamage(target.profileKey === 'warden' ? 16 : 22, action);
+    const damage = playerDamage(attackDamage('sword', target.profileKey), action);
     playSfx('sword');
     applyEnemyDamage(target, damage, 0xe9b36f, `${target.name} takes ${damage} damage.`);
   } else if (action === 'fire' && distance <= 8.5) {
@@ -3648,27 +3655,17 @@ function openChest(chest) {
     colliderWidth: 1.25,
     colliderDepth: 0.9,
   });
-  state.openedChests += 1;
-  spawnBurst(chest.position, 0xf4d071, 22);
-  playSfx('chest');
-  addCameraFeedback(0.055, 0.9);
+  applyChestRewards(state, chest, Object.keys(state.actionCooldowns));
   if (chest.kind === 'seal') {
-    state.seals[chest.branch] = true;
-    state.playerHp = Math.min(state.playerMaxHp, state.playerHp + 25);
     spawnCombatText(chest.position, `${chest.branch.toUpperCase()} SEAL`, '#f2cf7c', 1.8);
     setToast(`The ${chest.branch}ern branch seal is yours.`, 2400);
   } else if (chest.kind === 'archive') {
-    state.archiveKey = true;
     spawnCombatText(chest.position, 'ARCHIVE KEY', '#c9b2f0', 1.8);
     setToast('The Archive key hums toward the Warden\'s Keep.', 2400);
   } else if (chest.kind === 'final') {
     spawnCombatText(chest.position, 'WARDEN RELIC', '#f2cf7c', 1.8);
     setToast('The Warden relic completes the delve. Return to the entrance.', 2400);
   } else {
-    state.playerHp = Math.min(state.playerMaxHp, state.playerHp + 12);
-    for (const action of Object.keys(state.actionCooldowns)) {
-      state.actionCooldowns[action] = Math.max(0, state.actionCooldowns[action] - 1.5);
-    }
     spawnCombatText(chest.position, 'RENEWED', '#9fe1bb', 1.8);
     setToast(`${chest.name} restores vitality and hastens your abilities.`);
   }
@@ -3810,7 +3807,10 @@ function animate() {
     updateWeaponState(delta);
     if (state.mode === 'dungeon') {
       updateProgression();
-      if (runObjectivesComplete() && player.root.position.distanceTo(state.exitPosition) < 2.4) {
+      if (isRunVictory({
+        objectivesComplete: runObjectivesComplete(),
+        distanceToExit: player.root.position.distanceTo(state.exitPosition),
+      })) {
         finishRun(true);
       }
       for (const enemy of enemies) {
