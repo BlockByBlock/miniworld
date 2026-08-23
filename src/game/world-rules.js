@@ -85,9 +85,7 @@ export function lootItemForProfile(profileKey) {
   return 'healingDraft';
 }
 
-// --- Combat math ---------------------------------------------------------
-
-export function playerDamage(baseDamage, action, { buffed = false, itemMultiplier = 1 } = {}) {
+export function playerDamage(baseDamage, { buffed = false, itemMultiplier = 1 } = {}) {
   return Math.round(baseDamage * (buffed ? 1.4 : 1) * itemMultiplier);
 }
 
@@ -101,10 +99,6 @@ export function attackDamage(action, targetProfileKey) {
     case 'freeze': return warden ? 7 : 10;
     default: return 0;
   }
-}
-
-export function attackRange(action, ranges) {
-  return ranges?.[action];
 }
 
 // --- Run objectives / win condition --------------------------------------

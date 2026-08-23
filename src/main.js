@@ -3038,7 +3038,7 @@ function updateEffects(delta) {
 }
 
 function playerDamage(baseDamage, action) {
-  return computePlayerDamage(baseDamage, action, {
+  return computePlayerDamage(baseDamage, {
     buffed: state.playerBuffTimer > 0,
     itemMultiplier: itemDamageMultiplier(action),
   });

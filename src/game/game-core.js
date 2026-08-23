@@ -197,12 +197,6 @@ export function createGameCore({
   const chestById = (id) => state.chests.find((chest) => chest.id === id) ?? null;
   const gateByCorridor = (corridorId) => state.gates.find((gate) => gate.corridorId === corridorId) ?? null;
 
-  function equippedDefinition() {
-    const itemId = state.equippedSlot === null ? null : state.inventory[state.equippedSlot];
-    return itemId ? worldData.items[itemId] : null;
-  }
-  const itemDamageMultiplier = (action) => equippedDefinition()?.damage?.[action] ?? 1;
-  const actionCooldownFor = (action) => actions[action].cooldown * (equippedDefinition()?.cooldown?.[action] ?? 1);
 
   // --- internal transitions ----------------------------------------------------
 
@@ -299,7 +293,8 @@ export function createGameCore({
     return { ok: true, npc: npc.name, kind: 'npc' };
   }
 
-  function moveTo(x, z, { maxSteps = 20000 } = {}) {
+  function moveTo(x, z) {
+    const maxSteps = 20000;
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
     const point = { x: state.playerX, z: state.playerZ };
     for (let stepIndex = 0; stepIndex < maxSteps; stepIndex += 1) {
@@ -430,8 +425,7 @@ export function createGameCore({
       state.combatStarted = true;
       const damage = playerDamage(
         attackDamage(action, target.profileKey),
-        action,
-        { buffed: state.playerBuffTimer > 0, itemMultiplier: itemDamageMultiplier(action) },
+        { buffed: state.playerBuffTimer > 0 },
       );
       killEnemy(target, action, damage);
     } else if (action === 'heal') {
@@ -445,7 +439,7 @@ export function createGameCore({
       state.playerBuffTimer = 8;
       record('buff-active', { duration: 8 });
     }
-    state.actionCooldowns[action] = actionCooldownFor(action);
+    state.actionCooldowns[action] = actions[action].cooldown;
     state.started = true;
     return { ok: true, action };
   }
@@ -593,7 +587,6 @@ export function createGameCore({
         dead: enemy.dead,
       })),
       loot: deepCopy(state.loot.filter((drop) => !drop.collected)),
-      inventory: [...state.inventory],
       objectives: {
         westSeal: state.seals.west,
         eastSeal: state.seals.east,
@@ -619,7 +612,7 @@ export function createGameCore({
     openGate,
     useAction,
     // test affordance mirroring __cryptTest.clearRoom
-    clearRoom(roomId = state.currentRoomId) {
+    clearRoom(roomId) {
       for (const enemy of state.enemies) {
         if (enemy.roomId !== roomId || enemy.dead) continue;
         enemy.dead = true;
@@ -634,7 +627,5 @@ export function createGameCore({
     loadCheckpoint,
     describe,
     getEvents,
-    isWalkable,
-    state,
   };
 }

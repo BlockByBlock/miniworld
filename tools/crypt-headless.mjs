@@ -135,7 +135,7 @@ const result = {
   seed,
   finished: view.finished,
   objectives: view.objectives,
-  elapsedSimSeconds: Number(core.state.elapsed.toFixed(1)),
+  elapsedSimSeconds: Number(view.elapsed.toFixed(1)),
   discoveredRooms: view.discoveredRooms.length,
   enemiesDefeated: view.enemies.filter((enemy) => enemy.dead).length,
   chestOpenings: view.openedChests,
