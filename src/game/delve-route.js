@@ -84,13 +84,12 @@ export const DELVE_STEPS = [
   { type: 'tick', delta: 0.1 },
 ];
 
-function killWithFire(core, targetId, { onRetry } = {}) {
+function killWithFire(core, targetId) {
   let attempts = 0;
   while ((core.describe().enemies.find((enemy) => enemy.id === targetId)?.hp ?? 0) > 0) {
     const swing = core.useAction('fire', targetId);
     if (!swing.ok && swing.reason === 'cooldown') {
       core.tick(swing.remaining);
-      onRetry?.();
     } else if (!swing.ok) {
       throw new Error(`attack failed: ${swing.reason}`);
     }

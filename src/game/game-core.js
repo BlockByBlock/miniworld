@@ -490,6 +490,8 @@ export function createGameCore({
         radius: INTERACT_RADII.loot,
         items: state.loot.filter((drop) => !drop.collected),
         position: (drop) => drop,
+        act: (drop) => collectLoot(drop),
+        lastInteraction: (drop) => ({ kind: 'loot', itemId: drop.itemId }),
       },
       {
         kind: 'chest',
@@ -516,12 +518,10 @@ export function createGameCore({
         .map((item) => ({ item, d: distanceTo(position(item).x, position(item).z) }))
         .sort((a, b) => a.d - b.d)[0];
       if (!nearest || nearest.d > radius) continue;
-      const outcome = act ? act(nearest.item) : collectLoot(nearest.item);
+      const outcome = act(nearest.item);
       if (outcome.ok) {
         state.interactionCount += 1;
-        state.lastInteraction = lastInteraction
-          ? lastInteraction(nearest.item)
-          : { kind, itemId: outcome.itemId };
+        state.lastInteraction = lastInteraction(nearest.item);
       }
       return { ...outcome, kind };
     }

@@ -108,20 +108,24 @@ const ACTION_BY_KEY = new Map(
 // than world data: windup locks, recovery, cast clips, and resolve behavior.
 // One row per action instead of ternaries scattered through useAction and
 // applyPlayerAction.
-const ACTION_RUNTIME = {
-  sword: { attackLock: 0.67, attackCooldown: 0.52, attackTimer: 0.24, clips: ['1h_melee_attack', 'melee_attack', 'attack'], spell: false },
-  fire: { attackLock: 0.58, attackCooldown: 0.78, castClip: 'Cast_Fire', spell: true },
-  freeze: { attackLock: 0.58, attackCooldown: 0.78, castClip: 'Cast_Frost', spell: true },
-  heal: { attackLock: 0.62, attackCooldown: 0.65, castClip: 'Cast_Heal', spell: true },
-  buff: { attackLock: 0.56, attackCooldown: 0.65, castClip: 'Cast_Arcane', spell: true },
-};
-
 const SPELL_COLORS = Object.fromEntries(Object.entries(WORLD_DATA.actions)
   .filter(([, action]) => action.spellColor)
   .map(([id, action]) => [id, action.spellColor]));
 const SPELL_CAST_TIMES = Object.fromEntries(Object.entries(WORLD_DATA.actions)
   .filter(([, action]) => action.castTime !== undefined)
   .map(([id, action]) => [id, action.castTime]));
+
+// Per-action runtime constants that are presentation/timing concerns rather
+// than world data: windup locks, recovery, cast clips/timers, and resolve
+// behavior. One row per action instead of ternaries scattered through
+// useAction and applyPlayerAction.
+const ACTION_RUNTIME = {
+  sword: { attackLock: 0.67, attackCooldown: 0.52, attackTimer: 0.24, clips: ['1h_melee_attack', 'melee_attack', 'attack'], spell: false },
+  fire: { attackLock: 0.58, attackCooldown: 0.78, attackTimer: SPELL_CAST_TIMES.fire, castClip: 'Cast_Fire', spell: true },
+  freeze: { attackLock: 0.58, attackCooldown: 0.78, attackTimer: SPELL_CAST_TIMES.freeze, castClip: 'Cast_Frost', spell: true },
+  heal: { attackLock: 0.62, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.heal, castClip: 'Cast_Heal' },
+  buff: { attackLock: 0.56, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.buff, castClip: 'Cast_Arcane' },
+};
 const ITEM_DEFS = WORLD_DATA.items;
 const ENEMY_PROFILES = WORLD_DATA.enemyProfiles;
 const WORLD = WORLD_DATA.world;
@@ -1187,12 +1191,10 @@ function resolveCoordinate(value, room) {
 }
 
 function decorateRoom(room) {
-  const resolved = ROOM_DECORATIONS[room.id] ?? [];
-  for (const entry of resolved) {
-    const op = DECOR_OPS[entry.op];
-    if (!op) throw new Error(`Unknown decoration op ${entry.op} in ${room.id}`);
-    const { op: _op, x, z, ...rest } = entry;
-    op(room, { ...rest, ...(x !== undefined ? { x: resolveCoordinate(x, room) } : {}), ...(z !== undefined ? { z: resolveCoordinate(z, room) } : {}) });
+  for (const { op: name, x, z, ...spec } of ROOM_DECORATIONS[room.id] ?? []) {
+    const operation = DECOR_OPS[name];
+    if (!operation) throw new Error(`Unknown decoration op ${name} in ${room.id}`);
+    operation(room, { ...spec, x: resolveCoordinate(x, room), z: resolveCoordinate(z, room) });
   }
 }
 
@@ -2906,34 +2908,27 @@ function useAction(action, target = selectedTarget) {
     setToast('Vitality is already full.', 1000);
     return;
   }
+  const runtime = ACTION_RUNTIME[action];
   if (!selfAction) {
-    const range = actionDef.range;
-    if (player.root.position.distanceTo(target.root.position) > range) {
+    if (player.root.position.distanceTo(target.root.position) > actionDef.range) {
       setToast(`${target.name} is out of range.`, 1100);
       return;
     }
     state.combatStarted = true;
     state.weaponReadyTimer = 4.5;
     player.setWeaponSheathed(false);
-    const runtime = ACTION_RUNTIME[action];
-    player.attackLock = runtime.attackLock;
-    player.attackCooldown = runtime.attackCooldown;
-    player.attackTimer = runtime.attackTimer ?? SPELL_CAST_TIMES[action];
     player.attackTarget = target;
-    player.pendingAction = action;
     player.face(target.root.position);
     player.play(runtime.clips ?? [runtime.castClip], { once: true, force: true });
-    if (action !== 'sword') spawnSpellCharge(action);
   } else {
-    const runtime = ACTION_RUNTIME[action];
-    player.attackLock = runtime.attackLock;
-    player.attackCooldown = runtime.attackCooldown;
-    player.attackTimer = SPELL_CAST_TIMES[action];
     player.attackTarget = null;
-    player.pendingAction = action;
     player.play([runtime.castClip], { once: true, force: true });
-    spawnSpellCharge(action);
   }
+  player.attackLock = runtime.attackLock;
+  player.attackCooldown = runtime.attackCooldown;
+  player.attackTimer = runtime.attackTimer;
+  player.pendingAction = action;
+  if (action !== 'sword') spawnSpellCharge(action);
   state.actionCooldowns[action] = actionCooldownFor(action);
   state.started = true;
 }
