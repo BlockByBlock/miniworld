@@ -85,7 +85,8 @@ export const DELVE_STEPS = [
 ];
 
 function killWithFire(core, targetId) {
-  let attempts = 0;
+  // The guard counts simulation turns (cooldown ticks included), not swings.
+  let turns = 0;
   while ((core.describe().enemies.find((enemy) => enemy.id === targetId)?.hp ?? 0) > 0) {
     const swing = core.useAction('fire', targetId);
     if (!swing.ok && swing.reason === 'cooldown') {
@@ -93,7 +94,7 @@ function killWithFire(core, targetId) {
     } else if (!swing.ok) {
       throw new Error(`attack failed: ${swing.reason}`);
     }
-    if ((attempts += 1) > KILL_LOOP_GUARD) throw new Error(`${targetId} fight did not converge`);
+    if ((turns += 1) > KILL_LOOP_GUARD) throw new Error(`${targetId} fight did not converge`);
   }
 }
 

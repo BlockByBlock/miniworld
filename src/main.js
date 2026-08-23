@@ -125,8 +125,8 @@ const ACTION_RUNTIME = {
   sword: { attackLock: 0.67, attackCooldown: 0.52, attackTimer: 0.24, clips: ['1h_melee_attack', 'melee_attack', 'attack'], spell: false },
   fire: { attackLock: 0.58, attackCooldown: 0.78, attackTimer: SPELL_CAST_TIMES.fire, castClip: 'Cast_Fire', spell: true },
   freeze: { attackLock: 0.58, attackCooldown: 0.78, attackTimer: SPELL_CAST_TIMES.freeze, castClip: 'Cast_Frost', spell: true },
-  heal: { attackLock: 0.62, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.heal, castClip: 'Cast_Heal' },
-  buff: { attackLock: 0.56, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.buff, castClip: 'Cast_Arcane' },
+  heal: { attackLock: 0.62, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.heal, castClip: 'Cast_Heal', spell: true },
+  buff: { attackLock: 0.56, attackCooldown: 0.65, attackTimer: SPELL_CAST_TIMES.buff, castClip: 'Cast_Arcane', spell: true },
 };
 const ITEM_DEFS = WORLD_DATA.items;
 const ENEMY_PROFILES = WORLD_DATA.enemyProfiles;
@@ -2917,7 +2917,7 @@ function useAction(action, target = selectedTarget) {
   player.attackCooldown = runtime.attackCooldown;
   player.attackTimer = runtime.attackTimer;
   player.pendingAction = action;
-  if (action !== 'sword') spawnSpellCharge(action);
+  if (runtime.spell) spawnSpellCharge(action);
   state.actionCooldowns[action] = actionCooldownFor(action);
   state.started = true;
 }
