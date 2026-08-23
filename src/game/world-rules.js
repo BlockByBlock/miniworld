@@ -14,36 +14,42 @@ export const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
 
 // --- Gates ---------------------------------------------------------------
 
-// Mirrors openGate(): a gate opens only from one of its two rooms and only
-// once that room holds no living guardians.
+// A gate opens only from one of its two rooms and only once that room holds
+// no living guardians. `code` is the machine-readable outcome for agents and
+// events; `message` is optional display prose for the rendered toast layer.
 export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
-  if (!gate || gate.open) return { ok: false, reason: '' };
-  if (!gate.roomIds.includes(currentRoomId)) return { ok: false, reason: '' };
+  if (!gate || gate.open) return { ok: false, code: 'unavailable', message: '' };
+  if (!gate.roomIds.includes(currentRoomId)) return { ok: false, code: 'wrong-room', message: '' };
   if (livingInRoomCount > 0) {
     return {
       ok: false,
-      reason: `The gate is sealed by ${livingInRoomCount} remaining guardian${livingInRoomCount === 1 ? '' : 's'}.`,
+      code: 'warded',
+      message: `The gate is sealed by ${livingInRoomCount} remaining guardian${livingInRoomCount === 1 ? '' : 's'}.`,
     };
   }
-  return { ok: true, reason: '' };
+  return { ok: true, code: 'opened', message: '' };
 }
 
 // --- Chests --------------------------------------------------------------
-// Mirrors chestBlockReason(): the caller resolves the relevant living-enemy
-// count for the chest kind, this only turns it into a display reason.
-export function evaluateChestBlock({ chest, guardianCount = 0 }) {
+
+// The single place that maps a chest kind onto its warding population and
+// its blocked message. Callers hand in two population resolvers; every kind
+// dispatch lives here so main.js and game-core cannot drift.
+export function evaluateChestBlock({ chest, branchGuardians, roomGuardians }) {
   if (!chest || chest.opened) return '';
-  if (chest.kind === 'seal' && guardianCount > 0) {
-    return `The ${chest.branch}ern seal remains warded by ${guardianCount} guardian${guardianCount === 1 ? '' : 's'}.`;
+  if (chest.kind === 'seal') {
+    const count = branchGuardians(chest.branch);
+    if (count > 0) {
+      return `The ${chest.branch}ern seal remains warded by ${count} guardian${count === 1 ? '' : 's'}.`;
+    }
   }
-  if (chest.kind === 'archive' && guardianCount > 0) {
+  if (chest.kind === 'archive' && branchGuardians('north', { includeWarden: false }) > 0) {
     return 'The Archive cache remains sealed while its acolytes stand.';
   }
-  if (chest.kind === 'final' && guardianCount > 0) {
-    return 'The Warden\'s reliquary is still bound to the living dead.';
-  }
-  if (chest.kind === 'cache' && guardianCount > 0) {
-    return 'Clear this chamber before opening its cache.';
+  if ((chest.kind === 'final' || chest.kind === 'cache') && roomGuardians(chest.roomId) > 0) {
+    return chest.kind === 'final'
+      ? 'The Warden\'s reliquary is still bound to the living dead.'
+      : 'Clear this chamber before opening its cache.';
   }
   return '';
 }
@@ -125,6 +131,43 @@ export function attackDamage(action, targetProfileKey) {
 export function runObjectivesComplete({ wardenSpoilsOpened, livingEnemyCount }) {
   return Boolean(wardenSpoilsOpened) && livingEnemyCount === 0;
 }
+
+// --- Zone visibility / room transitions -----------------------------------
+
+// Zones currently rendered/active for a room: the room itself plus its
+// non-room neighbors, plus every open gate and the rooms it connects.
+export function visibleZoneIdsFor({ currentRoomId, neighborIdsByZone, gates, isRoom }) {
+  const visible = new Set([currentRoomId]);
+  for (const neighborId of neighborIdsByZone.get(currentRoomId) ?? []) {
+    if (!isRoom(neighborId)) visible.add(neighborId);
+  }
+  for (const gate of gates) {
+    if (!gate.open) continue;
+    visible.add(gate.corridorId);
+    gate.roomIds.forEach((id) => visible.add(id));
+  }
+  return [...visible];
+}
+
+// Pure room-transition decision used by updateProgression() on both sides.
+// Returns which room (if any) the actor fully entered at (x, z) given the
+// entry clearance, and which traversed gate should close as a consequence.
+export function resolveRoomEntry({ x, z, rooms, currentRoomId, gates, clearance = 0 }) {
+  const room = rooms.find((candidate) => (
+    x >= candidate.minX + clearance && x <= candidate.maxX - clearance
+    && z >= candidate.minZ + clearance && z <= candidate.maxZ - clearance
+  )) ?? null;
+  if (!room || room.id === currentRoomId) return { entered: false };
+  return {
+    entered: true,
+    roomId: room.id,
+    label: room.label ?? null,
+    traversedGate: gates.find((gate) => (
+      gate.open && gate.fromRoomId === currentRoomId && gate.toRoomId === room.id
+    )) ?? null,
+  };
+}
+
 
 export function isRunVictory({ objectivesComplete, distanceToExit }) {
   return objectivesComplete && distanceToExit < EXIT_RADIUS;

@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
 import { createGameCore } from '../src/game/game-core.js';
+import { runDelve } from '../src/game/delve-route.js';
 
 function freshCore() {
   const core = createGameCore();
@@ -41,16 +42,27 @@ test('talking to the hunter enters the dungeon after the trail delay', () => {
 });
 test('evaluateChestBlock wards every kind on its resolved guardian count', async () => {
   const { evaluateChestBlock } = await import('../src/game/world-rules.js');
-  const chest = (kind, branch = null) => ({ kind, branch, opened: false });
-  // A wrong wiring (e.g. passing an unknown count key) resolves to 0 and
-  // silently opens warded chests — each kind must block while guarded.
+  const chest = (kind, branch = null) => ({ kind, branch, roomId: 'hub', opened: false });
+  const resolvers = {
+    branchGuardians: () => 2,
+    roomGuardians: () => 3,
+  };
+  // Each kind must block while its warding population stands, using the
+  // resolver that matches the kind — never a silently-zero default.
   for (const kind of ['seal', 'archive', 'final', 'cache']) {
     assert.match(
-      evaluateChestBlock({ chest: chest(kind, 'west'), guardianCount: 2 }),
+      evaluateChestBlock({ chest: chest(kind, 'west'), ...resolvers }),
       /warded|sealed|bound|Clear this chamber/,
       `${kind} must stay blocked with guardians alive`,
     );
-    assert.equal(evaluateChestBlock({ chest: chest(kind, 'west'), guardianCount: 0 }), '');
+    assert.equal(
+      evaluateChestBlock({
+        chest: chest(kind, 'west'),
+        branchGuardians: () => 0,
+        roomGuardians: () => 0,
+      }),
+      '',
+    );
   }
 });
 
@@ -129,102 +141,15 @@ test('checkpoints restore an identical mid-run state', () => {
   assert.equal(restored.openGate('west-deep-corridor').ok, true);
 });
 
-test('full delve: New Game to victory via semantic actions (clearRoom as accelerated combat)', () => {
+test('full delve: New Game to victory via the shared delve route', async () => {
   const core = freshCore();
-  enterDungeon(core); // talkTo('Hunter') + tick
-  const open = (corridorId) => {
-    const outcome = core.openGate(corridorId);
-    assert.equal(outcome.ok, true, `gate ${corridorId}: ${outcome.reason}`);
-  };
-  const walk = (x, z) => {
-    const outcome = core.moveTo(x, z);
-
-  };
-
-  // West branch.
-  open('entry-corridor');
-  walk(0, 12.5);
-  open('west-corridor');
-  walk(-26, 9);
-  core.clearRoom('westGate');
-  open('west-deep-corridor');
-  walk(-47, 9);
-  core.clearRoom('westBurial');
-  open('west-drop');
-  walk(-47, -13);
-  core.clearRoom('westOssuary');
-  assert.equal(core.interact().kind, 'chest'); // west-seal
-
-  // East branch (the gate behind us closed on entry — reopen as we go).
-  open('west-drop');
-  walk(-47, 9);
-  open('west-deep-corridor');
-  walk(-26, 9);
-  open('west-corridor');
-  walk(0, 12.5);
-  open('east-corridor');
-  walk(26, 9);
-  core.clearRoom('eastGate');
-  open('east-deep-corridor');
-  walk(47, 9);
-  core.clearRoom('eastFlooded');
-  open('east-drop');
-  walk(47, -12.5);
-  core.clearRoom('eastReliquary');
-  assert.equal(core.interact().kind, 'chest'); // east-seal
-
-  // North branch.
-  open('east-drop');
-  walk(47, 9);
-  open('east-deep-corridor');
-  walk(26, 9);
-  open('east-corridor');
-  walk(0, -8);
-  core.clearRoom('northHall');
-  open('archive-corridor');
-  walk(0, -27);
-  core.clearRoom('northLibrary');
-  // The archive cache stays sealed while its acolytes stand, and the keep's
-  // vanguard counts as north-branch guardians — so the warden falls first.
-  assert.equal(
-    core.interact().reason,
-    'The Archive cache remains sealed while its acolytes stand.',
-  );
-  open('warden-corridor');
-  // Kite: stand just inside the keep, out of every enemy's attack range but
-  // within firebolt range (8.5) of the warden.
-  walk(0, -36);
-  let guard = 0;
-  while (core.describe().enemies.find((enemy) => enemy.id === 'crypt-warden')?.hp > 0) {
-    const swing = core.useAction('fire', 'crypt-warden');
-    if (!swing.ok && swing.reason === 'cooldown') core.tick(swing.remaining);
-    else assert.equal(swing.ok, true, `attack failed: ${swing.reason}`);
-    if (++guard > 400) assert.fail('warden fight did not converge');
-  }
-  core.clearRoom('wardenKeep');
-
-  // With the whole north branch silent the archive key yields, then the
-  // spoils chest opens back inside the keep.
-  open('warden-corridor');
-  walk(0, -27);
-  assert.equal(core.interact().kind, 'chest'); // archive-key
-  open('warden-corridor');
-  walk(0, -40);
-  walk(0, -47.5);
-  assert.equal(core.interact().kind, 'chest'); // warden-spoils
-
-  // Return to the entrance vault and finish at the exit.
-  open('warden-corridor');
-  walk(0, -27);
-  open('archive-corridor');
-  walk(0, -8);
-  open('north-corridor');
-  walk(0, 12.5);
-  open('entry-corridor');
-  walk(0, 31.2);
-  core.tick(0.1);
+  runDelve(core); // includes the semantic New Game path: talkTo + trail tick
 
   const view = core.describe();
+  assert.equal(view.finished, true);
+  assert.equal(view.objectives.complete, true);
+  assert.equal(view.seals.west, true);
+  assert.equal(view.seals.east, true);
   assert.equal(view.archiveKey, true);
   assert.equal(view.enemies.every((enemy) => enemy.dead), true);
   assert.ok(core.getEvents().some((event) => event.type === 'run-finished' && event.success));

@@ -29,10 +29,13 @@ import {
   isRunVictory,
   lootItemForProfile,
   playerDamage,
+  resolveRoomEntry,
   runObjectivesComplete,
+  visibleZoneIdsFor,
 } from './world-rules.js';
 const MOVE_ARRIVE_DISTANCE = 0.35;
 const MOVE_TICK_SECONDS = 0.1;
+const ROOM_ENTRY_CLEARANCE = 1.1;
 
 export function createGameCore({
   worldData = WORLD_DATA,
@@ -72,7 +75,6 @@ export function createGameCore({
     return {
       mode: 'town',
       started: false,
-      combatStarted: false,
       finished: false,
       failed: false,
       playerHp: worldData.player.maxHp,
@@ -181,16 +183,12 @@ export function createGameCore({
   }
 
   function recomputeVisibleZones() {
-    const nextVisible = new Set([state.currentRoomId]);
-    for (const neighborId of zoneNeighbors.get(state.currentRoomId) ?? []) {
-      if (!roomIds.has(neighborId)) nextVisible.add(neighborId);
-    }
-    for (const gate of state.gates) {
-      if (!gate.open) continue;
-      nextVisible.add(gate.corridorId);
-      gate.roomIds.forEach((id) => nextVisible.add(id));
-    }
-    state.visibleZoneIds = [...nextVisible];
+    state.visibleZoneIds = visibleZoneIdsFor({
+      currentRoomId: state.currentRoomId,
+      neighborIdsByZone: zoneNeighbors,
+      gates: state.gates,
+      isRoom: (id) => roomIds.has(id),
+    });
   }
 
   const enemyAccessible = (enemy) => state.visibleZoneIds.includes(enemy.roomId);
@@ -212,7 +210,6 @@ export function createGameCore({
     if (state.mode === 'dungeon') return;
     state.mode = 'dungeon';
     state.started = false;
-    state.combatStarted = false;
     // Mirrors the rendered trail: the actor always arrives at the entrance
     // vault door, regardless of where they stood in Ravenrest.
     state.playerX = 0;
@@ -224,31 +221,35 @@ export function createGameCore({
     record('dungeon-entered', { position: { x: state.playerX, z: state.playerZ } });
   }
 
-  // Mirrors updateProgression(): zone tracking, gate closure once the actor
-  // has fully entered the next room, discovery, visibility.
+  // Zone tracking, gate closure once the actor fully entered the next room,
+  // discovery and visibility. The decision comes from the shared
+  // resolveRoomEntry rule; only state mutation lives here.
   function updateProgression() {
     const zone = zoneAtPosition(state.playerX, state.playerZ);
     if (zone && zone.id !== state.currentZoneId) state.currentZoneId = zone.id;
-    const room = roomAtPosition(state.playerX, state.playerZ, 1.1);
-    if (!room) return;
-    if (room.id === state.currentRoomId) {
+    const transition = resolveRoomEntry({
+      x: state.playerX,
+      z: state.playerZ,
+      rooms: map.rooms,
+      currentRoomId: state.currentRoomId,
+      gates: state.gates,
+      clearance: ROOM_ENTRY_CLEARANCE,
+    });
+    if (!transition.entered) {
       if (state.visibleZoneIds.length === 0) recomputeVisibleZones();
       return;
     }
-    const previousRoomId = state.currentRoomId;
-    const traversedGate = state.gates.find((gate) => (
-      gate.open && gate.fromRoomId === previousRoomId && gate.toRoomId === room.id
-    ));
-    if (traversedGate) {
+    if (transition.traversedGate) {
+      const traversedGate = transition.traversedGate;
       traversedGate.open = false;
       traversedGate.fromRoomId = null;
       traversedGate.toRoomId = null;
-      record('gate-closed', { corridorId: traversedGate.corridorId, from: previousRoomId, to: room.id });
+      record('gate-closed', { corridorId: traversedGate.corridorId, from: state.currentRoomId, to: transition.roomId });
     }
-    state.currentRoomId = room.id;
-    if (!state.discoveredRooms.includes(room.id)) state.discoveredRooms.push(room.id);
+    state.currentRoomId = transition.roomId;
+    if (!state.discoveredRooms.includes(transition.roomId)) state.discoveredRooms.push(transition.roomId);
     recomputeVisibleZones();
-    record('room-entered', { roomId: room.id });
+    record('room-entered', { roomId: transition.roomId });
   }
 
   function spawnLoot(enemy) {
@@ -275,13 +276,12 @@ export function createGameCore({
     return { ok: true };
   }
 
-  function talkTo(roleOrName) {
+  function talkTo(role) {
     if (state.mode !== 'town' || state.finished || state.failed) {
       return { ok: false, reason: 'not-in-town' };
     }
-    const npc = worldData.town.npcs.find((candidate) => (
-      candidate.role === roleOrName || candidate.name === roleOrName
-    ));
+    const npc = worldData.town.npcs.find((candidate) => candidate.role === role)
+      ?? worldData.town.npcs.find((candidate) => candidate.name === role);
     if (!npc) return { ok: false, reason: 'no-such-npc' };
     const [x, z] = npc.position;
     const distance = Math.hypot(state.playerX - x, state.playerZ - z);
@@ -339,8 +339,8 @@ export function createGameCore({
       livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
     });
     if (!verdict.ok) {
-      record('gate-blocked', { corridorId: gate?.corridorId ?? null, reason: verdict.reason });
-      return { ok: false, reason: verdict.reason };
+      record('gate-blocked', { corridorId: gate?.corridorId ?? null, code: verdict.code, message: verdict.message });
+      return { ok: false, code: verdict.code, reason: verdict.message };
     }
     gate.open = true;
     gate.fromRoomId = state.currentRoomId;
@@ -369,12 +369,11 @@ export function createGameCore({
   }
 
   function openChestOutcome(chest) {
-    const guardianCount = chest.kind === 'seal'
-      ? livingEnemiesInBranch(chest.branch).length
-      : chest.kind === 'archive'
-        ? livingEnemiesInBranch('north', { includeWarden: false }).length
-        : livingEnemiesInRoom(chest.roomId).length;
-    const blockedReason = evaluateChestBlock({ chest, guardianCount });
+    const blockedReason = evaluateChestBlock({
+      chest,
+      branchGuardians: (branch) => livingEnemiesInBranch(branch).length,
+      roomGuardians: (roomId) => livingEnemiesInRoom(roomId).length,
+    });
     if (blockedReason) {
       record('chest-blocked', { chestId: chest.id, reason: blockedReason });
       return { ok: false, reason: blockedReason };
@@ -420,7 +419,6 @@ export function createGameCore({
       if (distance > actionDef.range) {
         return { ok: false, reason: 'out-of-range', distance };
       }
-      state.combatStarted = true;
       const damage = playerDamage(attackDamage(action, target.profileKey), {
         buffed: state.playerBuffTimer > 0,
         itemMultiplier: itemDamageMultiplier(action),
@@ -484,39 +482,48 @@ export function createGameCore({
       return { ok: false, reason: 'nothing-nearby' };
     }
     state.started = true;
-    const nearest = (list, radius, pick) => list
-      .map((item) => ({ item, d: Math.hypot(state.playerX - pick(item).x, state.playerZ - pick(item).z) }))
-      .sort((a, b) => a.d - b.d)[0];
-    const nearLoot = nearest(state.loot.filter((drop) => !drop.collected), INTERACT_RADII.loot, (d) => d);
-    if (nearLoot && nearLoot.d <= INTERACT_RADII.loot) {
-      const outcome = collectLoot(nearLoot.item);
+    const distanceTo = (x, z) => Math.hypot(state.playerX - x, state.playerZ - z);
+    // Interact targets in production priority order: loot, chest, gate.
+    const targets = [
+      {
+        kind: 'loot',
+        radius: INTERACT_RADII.loot,
+        items: state.loot.filter((drop) => !drop.collected),
+        position: (drop) => drop,
+      },
+      {
+        kind: 'chest',
+        radius: INTERACT_RADII.chest,
+        items: state.chests.filter((chest) => !chest.opened),
+        position: (chest) => chest,
+        act: (chest) => openChestOutcome(chest),
+        lastInteraction: (chest) => ({ kind: 'chest', id: chest.id }),
+      },
+      {
+        kind: 'gate',
+        radius: INTERACT_RADII.gate,
+        items: state.gates.filter((gate) => !gate.open),
+        position: (gate) => {
+          const corridor = zoneById.get(gate.corridorId);
+          return { x: (corridor.minX + corridor.maxX) / 2, z: (corridor.minZ + corridor.maxZ) / 2 };
+        },
+        act: (gate) => attemptGateOpen(gate),
+        lastInteraction: (gate) => ({ kind: 'gate', id: gate.corridorId }),
+      },
+    ];
+    for (const { kind, radius, items, position, act, lastInteraction } of targets) {
+      const nearest = items
+        .map((item) => ({ item, d: distanceTo(position(item).x, position(item).z) }))
+        .sort((a, b) => a.d - b.d)[0];
+      if (!nearest || nearest.d > radius) continue;
+      const outcome = act ? act(nearest.item) : collectLoot(nearest.item);
       if (outcome.ok) {
         state.interactionCount += 1;
-        state.lastInteraction = { kind: 'loot', itemId: outcome.itemId };
+        state.lastInteraction = lastInteraction
+          ? lastInteraction(nearest.item)
+          : { kind, itemId: outcome.itemId };
       }
-      return { ...outcome, kind: 'loot' };
-    }
-    const nearChest = nearest(state.chests.filter((chest) => !chest.opened), INTERACT_RADII.chest, (c) => c);
-    if (nearChest && nearChest.d <= INTERACT_RADII.chest) {
-      const outcome = openChestOutcome(nearChest.item);
-      if (outcome.ok) {
-        state.interactionCount += 1;
-        state.lastInteraction = { kind: 'chest', id: nearChest.item.id };
-      }
-      return { ...outcome, kind: 'chest' };
-    }
-    const gateCenter = (gate) => {
-      const corridor = zoneById.get(gate.corridorId);
-      return { x: (corridor.minX + corridor.maxX) / 2, z: (corridor.minZ + corridor.maxZ) / 2 };
-    };
-    const nearGate = nearest(state.gates.filter((gate) => !gate.open), INTERACT_RADII.gate, gateCenter);
-    if (nearGate && nearGate.d <= INTERACT_RADII.gate) {
-      const outcome = attemptGateOpen(nearGate.item);
-      if (outcome.ok) {
-        state.interactionCount += 1;
-        state.lastInteraction = { kind: 'gate', id: nearGate.item.corridorId };
-      }
-      return { ...outcome, kind: 'gate' };
+      return { ...outcome, kind };
     }
     record('interact-nothing-nearby');
     return { ok: false, reason: 'nothing-nearby' };

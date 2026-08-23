@@ -17,7 +17,9 @@ import {
   isWalkablePoint,
   stepActorWithinMap,
 } from './movement-contracts.js';
+import { initAudio, playSfx } from './audio.js';
 import { WORLD_DATA } from './world-data.js';
+import { ROOM_DECORATIONS } from './game/room-decorations.js';
 import {
   EXIT_POSITION,
   HEAL_FRACTION,
@@ -30,7 +32,9 @@ import {
   isRunVictory,
   lootItemForProfile,
   playerDamage as computePlayerDamage,
+  resolveRoomEntry,
   runObjectivesComplete as evaluateObjectivesComplete,
+  visibleZoneIdsFor,
 } from './game/world-rules.js';
 import './style.css';
 
@@ -99,6 +103,18 @@ const ACTION_BAR_KEYS = Object.fromEntries(Object.entries(WORLD_DATA.actions).ma
 const ACTION_BY_KEY = new Map(
   Object.entries(ACTION_BAR_KEYS).flatMap(([action, codes]) => codes.map((code) => [code, action])),
 );
+
+// Per-action runtime constants that are presentation/timing concerns rather
+// than world data: windup locks, recovery, cast clips, and resolve behavior.
+// One row per action instead of ternaries scattered through useAction and
+// applyPlayerAction.
+const ACTION_RUNTIME = {
+  sword: { attackLock: 0.67, attackCooldown: 0.52, attackTimer: 0.24, clips: ['1h_melee_attack', 'melee_attack', 'attack'], spell: false },
+  fire: { attackLock: 0.58, attackCooldown: 0.78, castClip: 'Cast_Fire', spell: true },
+  freeze: { attackLock: 0.58, attackCooldown: 0.78, castClip: 'Cast_Frost', spell: true },
+  heal: { attackLock: 0.62, attackCooldown: 0.65, castClip: 'Cast_Heal', spell: true },
+  buff: { attackLock: 0.56, attackCooldown: 0.65, castClip: 'Cast_Arcane', spell: true },
+};
 
 const SPELL_COLORS = Object.fromEntries(Object.entries(WORLD_DATA.actions)
   .filter(([, action]) => action.spellColor)
@@ -358,132 +374,6 @@ let player;
 let toastTimeout;
 let pointerPress = null;
 let selectedTarget = null;
-let audioContext = null;
-let noiseBuffer = null;
-let moonLight = null;
-let blobShadowMesh = null;
-let townBlobShadowMesh = null;
-let townWorldGroup = null;
-let wardVisual = null;
-let targetMarker = null;
-let dialogueTimeout;
-
-const blobShadowPosition = new THREE.Vector3();
-const blobShadowScale = new THREE.Vector3();
-const blobShadowRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-const blobShadowMatrix = new THREE.Matrix4();
-
-function setLoading(progress, label) {
-  loadingFill.style.width = `${Math.round(progress * 100)}%`;
-  loadingLabel.textContent = label;
-}
-
-function setToast(message, duration = 2200) {
-  toast.textContent = message;
-  toast.classList.add('is-visible');
-  window.clearTimeout(toastTimeout);
-  toastTimeout = window.setTimeout(() => toast.classList.remove('is-visible'), duration);
-}
-
-function initAudio() {
-  if (!audioContext) {
-    const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    audioContext = new AudioContextClass();
-    noiseBuffer = audioContext.createBuffer(1, Math.floor(audioContext.sampleRate * 0.35), audioContext.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let index = 0; index < data.length; index += 1) data[index] = Math.random() * 2 - 1;
-  }
-  if (audioContext.state === 'suspended') audioContext.resume();
-}
-
-function playTone({ frequency = 220, endFrequency = frequency, duration = 0.12, gain = 0.035, type = 'sine' } = {}) {
-  if (!audioContext || audioContext.state !== 'running') return;
-  const now = audioContext.currentTime;
-  const oscillator = audioContext.createOscillator();
-  const volume = audioContext.createGain();
-  oscillator.type = type;
-  oscillator.frequency.setValueAtTime(frequency, now);
-  oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, endFrequency), now + duration);
-  volume.gain.setValueAtTime(gain, now);
-  volume.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-  oscillator.connect(volume).connect(audioContext.destination);
-  oscillator.start(now);
-  oscillator.stop(now + duration);
-}
-
-function playNoise({ duration = 0.08, gain = 0.025, frequency = 900 } = {}) {
-  if (!audioContext || audioContext.state !== 'running' || !noiseBuffer) return;
-  const now = audioContext.currentTime;
-  const source = audioContext.createBufferSource();
-  const filter = audioContext.createBiquadFilter();
-  const volume = audioContext.createGain();
-  source.buffer = noiseBuffer;
-  filter.type = 'lowpass';
-  filter.frequency.value = frequency;
-  volume.gain.setValueAtTime(gain, now);
-  volume.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-  source.connect(filter).connect(volume).connect(audioContext.destination);
-  source.start(now);
-  source.stop(now + duration);
-}
-
-function playSfx(name) {
-  if (!audioContext || audioContext.state !== 'running') return;
-  if (name === 'sword') {
-    playNoise({ duration: 0.09, gain: 0.035, frequency: 1800 });
-    playTone({ frequency: 210, endFrequency: 105, duration: 0.1, gain: 0.018, type: 'triangle' });
-  } else if (name === 'fire') {
-    playNoise({ duration: 0.2, gain: 0.025, frequency: 1400 });
-    playTone({ frequency: 180, endFrequency: 420, duration: 0.18, gain: 0.026, type: 'sawtooth' });
-  } else if (name === 'cast-fire') {
-    playTone({ frequency: 180, endFrequency: 520, duration: 0.24, gain: 0.018, type: 'sawtooth' });
-  } else if (name === 'fire-launch') {
-    playNoise({ duration: 0.08, gain: 0.018, frequency: 1800 });
-  } else if (name === 'fire-impact') {
-    playNoise({ duration: 0.16, gain: 0.03, frequency: 1200 });
-    playTone({ frequency: 260, endFrequency: 90, duration: 0.18, gain: 0.022, type: 'triangle' });
-  } else if (name === 'freeze') {
-    playTone({ frequency: 740, endFrequency: 290, duration: 0.28, gain: 0.026, type: 'sine' });
-    playTone({ frequency: 980, endFrequency: 520, duration: 0.2, gain: 0.014, type: 'triangle' });
-  } else if (name === 'cast-freeze') {
-    playTone({ frequency: 420, endFrequency: 980, duration: 0.3, gain: 0.018, type: 'sine' });
-  } else if (name === 'frost-launch') {
-    playTone({ frequency: 960, endFrequency: 620, duration: 0.12, gain: 0.014, type: 'triangle' });
-  } else if (name === 'frost-impact') {
-    playTone({ frequency: 1080, endFrequency: 260, duration: 0.24, gain: 0.022, type: 'sine' });
-    playNoise({ duration: 0.1, gain: 0.018, frequency: 2400 });
-  } else if (name === 'cast-heal') {
-    playTone({ frequency: 260, endFrequency: 640, duration: 0.32, gain: 0.018, type: 'sine' });
-  } else if (name === 'heal-impact') {
-    playTone({ frequency: 520, endFrequency: 860, duration: 0.24, gain: 0.02, type: 'sine' });
-  } else if (name === 'cast-buff') {
-    playTone({ frequency: 220, endFrequency: 740, duration: 0.28, gain: 0.018, type: 'triangle' });
-  } else if (name === 'ward-impact') {
-    playTone({ frequency: 360, endFrequency: 180, duration: 0.24, gain: 0.022, type: 'triangle' });
-  } else if (name === 'hurt') {
-    playNoise({ duration: 0.13, gain: 0.045, frequency: 520 });
-    playTone({ frequency: 120, endFrequency: 70, duration: 0.16, gain: 0.03, type: 'square' });
-  } else if (name === 'pickup') {
-    playTone({ frequency: 410, endFrequency: 760, duration: 0.16, gain: 0.026, type: 'sine' });
-  } else if (name === 'equip') {
-    playTone({ frequency: 270, endFrequency: 430, duration: 0.14, gain: 0.025, type: 'triangle' });
-  } else if (name === 'room') {
-    playTone({ frequency: 130, endFrequency: 190, duration: 0.3, gain: 0.012, type: 'sine' });
-  } else if (name === 'step') {
-    playNoise({ duration: 0.045, gain: 0.012, frequency: 260 });
-  } else if (name === 'chest') {
-    playTone({ frequency: 330, endFrequency: 660, duration: 0.22, gain: 0.027, type: 'triangle' });
-  } else if (name === 'warden-phase') {
-    playNoise({ duration: 0.28, gain: 0.035, frequency: 420 });
-    playTone({ frequency: 92, endFrequency: 38, duration: 0.5, gain: 0.032, type: 'sawtooth' });
-    playTone({ frequency: 180, endFrequency: 72, duration: 0.36, gain: 0.022, type: 'triangle' });
-  } else if (name === 'warden-collapse') {
-    playNoise({ duration: 0.12, gain: 0.026, frequency: 680 });
-    playTone({ frequency: 120, endFrequency: 420, duration: 0.34, gain: 0.022, type: 'square' });
-  }
-}
-
 function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraShake = Math.max(state.cameraShake, shake);
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
@@ -1256,135 +1146,24 @@ function addRoomLight(room, color, intensity = 1.35) {
   recordZoneLight(room.id, { x: center.x, z: center.z, color, intensity });
 }
 
-function decorateRoom(room) {
-  if (room.id === 'entrance') {
-    addColumn(-7.5, 23);
-    addColumn(7.5, 23);
-    addColumn(-7.5, 31);
-    addColumn(7.5, 31);
-    addWallTorch(room, 'west', 27);
-    addWallTorch(room, 'east', 27);
-    addDecoration('banner', room.minX + 0.7, 27, { height: 2.65, rotationY: Math.PI / 2 });
-    addDecoration('banner', room.maxX - 0.7, 27, { height: 2.65, rotationY: -Math.PI / 2 });
-    addDecoration('candleTriple', -8.4, 29.2, { height: 0.48 });
-    addDecoration('candleTriple', 8.4, 24.8, { height: 0.48, rotationY: Math.PI / 2 });
-    addRoomLight(room, 0xffbd74, 1.5);
-  } else if (room.id === 'hub') {
-    for (const [x, z] of [[-10, 5], [10, 5], [-10, 15], [10, 15]]) addColumn(x, z, 3);
-    addTomb(0, 10, 0, 1.15);
-    addWallTorch(room, 'north', -9);
-    addWallTorch(room, 'north', 9);
-    addWallTorch(room, 'south', -9);
-    addWallTorch(room, 'south', 9);
-    addDecoration('banner', room.minX + 0.7, 10, { height: 2.65, rotationY: Math.PI / 2 });
-    addDecoration('banner', room.maxX - 0.7, 10, { height: 2.65, rotationY: -Math.PI / 2 });
-    addDecoration('rubbleHalf', -12.1, 3.4, { width: 1.8 });
-    addDecoration('rubbleHalf', 11.8, 16.2, { width: 1.65, rotationY: Math.PI });
-    addBrokenFloor('brokenFloorA', -5, 9, Math.PI / 2);
-    addRoomLight(room, 0xffa767, 1.75);
-    recordZoneLight('hub', { x: -6.1, z: 4.25 });
-    recordZoneLight('hub', { x: 6.1, z: 4.25, color: 0xffa767, intensity: 2.6 });
-    recordZoneLight('hub', { x: 0, z: -4.75, color: 0x8e9aff, intensity: 2.2 });
-  } else if (room.id === 'westGate') {
-    for (const x of [-30, -26, -22]) {
-      addTomb(x, 4.4, Math.PI / 2, 0.82);
-      addTomb(x, 13.6, Math.PI / 2, 0.82);
+// Decoration ops are data (src/game/room-decorations.js); this is the
+// interpreter that maps each op onto the world-building helpers.
+const DECOR_OPS = {
+  column: (_, { x, z, height = 2.7 }) => addColumn(x, z, height),
+  tomb: (_, { x, z, rotationY = 0, scale = 1 }) => addTomb(x, z, rotationY, scale),
+  torch: (room, { wall, along }) => addWallTorch(room, wall, along),
+  decoration: (room, { asset, x, z, ...options }) => addDecoration(asset, x, z, options),
+  brokenFloor: (_, { asset, x, z, rotationY }) => addBrokenFloor(asset, x, z, rotationY),
+  light: (room, { color, intensity }) => addRoomLight(room, color, intensity),
+  zoneLight: (room, { x, z, color, intensity }) => recordZoneLight(room.id, { x, z, color, intensity }),
+  box: (_, spec) => addBox(spec),
+  water: (_, { spots, ...spec }) => {
+    const material = new THREE.MeshStandardMaterial({ color: 0x244e61, roughness: 0.42, metalness: 0.14 });
+    for (const [x, z] of spots) {
+      addBox({ x, y: 0.03, z, width: spec.width, height: spec.height ?? 0.08, depth: spec.depth, material });
     }
-    addWallTorch(room, 'north', -26);
-    addWallTorch(room, 'south', -26);
-    addDecoration('cobweb', -32.8, 3.1, { height: 1.25, rotationY: Math.PI / 2 });
-    addDecoration('cobweb', -19.2, 14.7, { height: 1.05, rotationY: -Math.PI / 2 });
-    addDecoration('boneA', -32, 14.1, { width: 1.15, rotationY: 0.4 });
-    addDecoration('rubbleLarge', -19.8, 3.4, { width: 1.8, rotationY: Math.PI });
-    addBrokenFloor('brokenFloorB', -26, 3.1, 0.25);
-    addRoomLight(room, 0xd78b64);
-  } else if (room.id === 'westBurial') {
-    for (const [x, z, rotation] of [[-53, 6, 0], [-47, 6, 0], [-41, 6, 0], [-53, 13, Math.PI], [-41, 13, Math.PI]]) {
-      addTomb(x, z, rotation, 0.9);
-    }
-    addWallTorch(room, 'south', -53);
-    addWallTorch(room, 'south', -41);
-    addDecoration('coffin', -47, 3.3, {
-      width: 2.2,
-      height: 1,
-      colliderWidth: 2.05,
-      colliderDepth: 0.9,
-    });
-    addDecoration('skullCandle', -54.2, 14.1, { height: 0.62, rotationY: -0.4 });
-    addDecoration('boneB', -39.8, 14.1, { width: 1.1, rotationY: 1.1 });
-    addDecoration('rubbleHalf', -54.2, 3.4, { width: 1.55, rotationY: 0.7 });
-    addRoomLight(room, 0xc7765c);
-  } else if (room.id === 'westOssuary') {
-    for (const [x, z] of [[-53, -13], [-41, -13], [-53, -4], [-41, -4]]) addColumn(x, z, 2.45);
-    addTomb(-47, -7, Math.PI / 2, 1.2);
-    addWallTorch(room, 'north', -53);
-    addWallTorch(room, 'north', -41);
-    addDecoration('boneA', -54.1, -14, { width: 1.15, rotationY: 0.2 });
-    addDecoration('boneB', -50.6, -14.2, { width: 1.05, rotationY: 1.5 });
-    addDecoration('boneC', -43.2, -14.1, { width: 1.2, rotationY: -0.6 });
-    addDecoration('skull', -54.4, -2, { height: 0.55, rotationY: 0.7 });
-    addDecoration('skullCandle', -39.8, -2.2, { height: 0.68 });
-    addDecoration('rubbleLarge', -39.8, -14.1, { width: 1.85, rotationY: Math.PI / 2 });
-    addRoomLight(room, 0xb08bff, 1.55);
-  } else if (room.id === 'eastGate') {
-    for (const [x, z] of [[22, 5], [30, 5], [22, 13], [30, 13]]) addColumn(x, z, 2.3);
-    const waterMaterial = new THREE.MeshStandardMaterial({ color: 0x244e61, roughness: 0.42, metalness: 0.14 });
-    addBox({ x: 26, y: 0.03, z: 5, width: 4.5, height: 0.08, depth: 2.2, material: waterMaterial });
-    addBox({ x: 26, y: 0.03, z: 13, width: 4.5, height: 0.08, depth: 2.2, material: waterMaterial });
-    addWallTorch(room, 'north', 20.5);
-    addWallTorch(room, 'south', 31.5);
-    addDecoration('barrelStack', 19.6, 14.2, {
-      width: 1.4,
-      colliderWidth: 1.25,
-      colliderDepth: 1.05,
-    });
-    addDecoration('crateStack', 32.1, 3.5, {
-      width: 1.65,
-      rotationY: Math.PI / 2,
-      colliderWidth: 1.4,
-      colliderDepth: 1.15,
-    });
-    addDecoration('woodSupport', 26, 14.5, { height: 2.15 });
-    addRoomLight(room, 0x65b6d1, 1.5);
-  } else if (room.id === 'eastFlooded') {
-    for (const [x, z, rotation] of [[41, 5, 0], [47, 5, 0], [53, 5, 0], [41, 13, Math.PI], [53, 13, Math.PI]]) {
-      addTomb(x, z, rotation, 0.9);
-    }
-    addWallTorch(room, 'south', 41);
-    addWallTorch(room, 'south', 53);
-    addDecoration('woodSupport', 47, 3.1, { height: 2.1, rotationY: Math.PI / 2 });
-    addDecoration('brokenTable', 54, 14.1, {
-      width: 2.2,
-      rotationY: Math.PI / 2,
-      colliderWidth: 1.9,
-      colliderDepth: 0.8,
-    });
-    addDecoration('boneC', 39.8, 14.1, { width: 1.15, rotationY: -0.8 });
-    addBrokenFloor('brokenFloorA', 47, 5, 0.3);
-    addBrokenFloor('brokenFloorB', 51, 13, -0.4);
-    addRoomLight(room, 0x65b6d1, 1.45);
-  } else if (room.id === 'eastReliquary') {
-    for (const [x, z] of [[41, -13], [53, -13], [41, -4], [53, -4]]) addColumn(x, z, 3.1);
-    addTomb(43, -8, 0, 0.9);
-    addTomb(51, -8, Math.PI, 0.9);
-    addWallTorch(room, 'north', 41);
-    addWallTorch(room, 'north', 53);
-    addDecoration('horseStatue', 47, -2.2, { height: 2.35, rotationY: Math.PI });
-    addDecoration('coins', 44.8, -13.3, { width: 1.2, rotationY: 0.2 });
-    addDecoration('coins', 49.2, -13.5, { width: 1, rotationY: -0.5 });
-    addDecoration('candleTriple', 39.8, -14.1, { height: 0.52 });
-    addDecoration('candleTriple', 54.2, -14.1, { height: 0.52, rotationY: Math.PI });
-    addRoomLight(room, 0xe0b75f, 1.65);
-  } else if (room.id === 'northHall') {
-    for (const [x, z] of [[-9, -7], [9, -7], [-9, -13], [9, -13]]) addColumn(x, z, 2.8);
-    addWallTorch(room, 'west', -10);
-    addWallTorch(room, 'east', -10);
-    addDecoration('rubbleHalf', -10.4, -14.4, { width: 1.55, rotationY: 0.8 });
-    addDecoration('rubbleLarge', 10.2, -5.5, { width: 1.75, rotationY: -0.5 });
-    addDecoration('cobweb', -10.8, -5.1, { height: 1.1, rotationY: Math.PI / 2 });
-    addBrokenFloor('brokenFloorB', 0, -10, Math.PI / 2);
-    addRoomLight(room, 0x8e9aff, 1.4);
-  } else if (room.id === 'northLibrary') {
+  },
+  bookcases: () => {
     for (const z of [-21, -25, -29]) {
       addDecoration('bookcase', -10.4, z, {
         height: 2.35,
@@ -1399,35 +1178,21 @@ function decorateRoom(room) {
         colliderDepth: 1.65,
       });
     }
-    addDecoration('brokenTable', 7.7, -30, {
-      width: 2.1,
-      colliderWidth: 1.85,
-      colliderDepth: 0.8,
-    });
-    addDecoration('candleTriple', -7.7, -19.5, { height: 0.5 });
-    addDecoration('cobweb', 10.7, -31, { height: 1.15, rotationY: -Math.PI / 2 });
-    addWallTorch(room, 'west', -21);
-    addWallTorch(room, 'east', -29);
-    addRoomLight(room, 0xa183cf, 1.45);
-  } else if (room.id === 'wardenKeep') {
-    for (const [x, z, rotation] of [[-12, -38, 0], [12, -38, 0], [-12, -46, Math.PI], [12, -46, Math.PI]]) {
-      addTomb(x, z, rotation, 1.05);
-    }
-    for (const [x, z] of [[-7, -37], [7, -37], [-7, -47], [7, -47]]) addColumn(x, z, 3.2);
-    addDecoration('coffin', -13.8, -42, {
-      width: 2.2,
-      rotationY: Math.PI / 2,
-      colliderWidth: 0.9,
-      colliderDepth: 2.05,
-    });
-    addDecoration('rubbleLarge', 13.8, -35.8, { width: 1.9, rotationY: -0.6 });
-    addDecoration('skullCandle', -14.1, -35.8, { height: 0.68 });
-    addDecoration('skullCandle', 14.1, -48.2, { height: 0.68, rotationY: Math.PI });
-    addBrokenFloor('brokenFloorA', -3, -42, 0.3);
-    addBrokenFloor('brokenFloorB', 3, -42, -0.4);
-    addWallTorch(room, 'north', -12);
-    addWallTorch(room, 'north', 12);
-    addRoomLight(room, 0xb08bff, 1.8);
+  },
+};
+
+// ['minX'|'maxX'|'minZ'|'maxZ', offset] resolves relative to the room bounds.
+function resolveCoordinate(value, room) {
+  return Array.isArray(value) ? room[value[0]] + value[1] : value;
+}
+
+function decorateRoom(room) {
+  const resolved = ROOM_DECORATIONS[room.id] ?? [];
+  for (const entry of resolved) {
+    const op = DECOR_OPS[entry.op];
+    if (!op) throw new Error(`Unknown decoration op ${entry.op} in ${room.id}`);
+    const { op: _op, x, z, ...rest } = entry;
+    op(room, { ...rest, ...(x !== undefined ? { x: resolveCoordinate(x, room) } : {}), ...(z !== undefined ? { z: resolveCoordinate(z, room) } : {}) });
   }
 }
 
@@ -1898,15 +1663,12 @@ function zoneAtPosition(position) {
 
 function updateZoneVisibility(roomId, force = false) {
   if (!ROOM_IDS.has(roomId)) return;
-  const nextVisible = new Set([roomId]);
-  for (const neighborId of ZONE_NEIGHBORS.get(roomId) ?? []) {
-    if (!ROOM_IDS.has(neighborId)) nextVisible.add(neighborId);
-  }
-  for (const gate of state.gates) {
-    if (!gate.open) continue;
-    nextVisible.add(gate.corridorId);
-    gate.roomIds.forEach((id) => nextVisible.add(id));
-  }
+  const nextVisible = new Set(visibleZoneIdsFor({
+    currentRoomId: roomId,
+    neighborIdsByZone: ZONE_NEIGHBORS,
+    gates: state.gates,
+    isRoom: (id) => ROOM_IDS.has(id),
+  }));
   const changed = force
     || nextVisible.size !== visibleZoneIds.size
     || [...nextVisible].some((id) => !visibleZoneIds.has(id));
@@ -2020,49 +1782,39 @@ function updateProgression() {
   }
   // Keep the gate open until the entire actor has cleared its collider rather
   // than closing on the first frame their center crosses the room boundary.
-  const room = roomAtPosition(player.root.position, ROOM_ENTRY_CLEARANCE);
-  if (!room) return;
-  const enteredNewRoom = room.id !== state.currentRoomId;
-  if (!enteredNewRoom) {
-    if (visibleZoneIds.size === 0) updateZoneVisibility(room.id, true);
+  // The enter/close decision itself lives in world-rules.resolveRoomEntry so
+  // the headless core follows the identical rule.
+  const transition = resolveRoomEntry({
+    x: player.root.position.x,
+    z: player.root.position.z,
+    rooms: MAP.rooms,
+    currentRoomId: state.currentRoomId,
+    gates: state.gates,
+    clearance: ROOM_ENTRY_CLEARANCE,
+  });
+  if (!transition.entered) {
+    if (visibleZoneIds.size === 0) updateZoneVisibility(state.currentRoomId, true);
     return;
   }
-  const previousRoomId = state.currentRoomId;
-  const traversedGate = state.gates.find((gate) => (
-    gate.open && gate.fromRoomId === previousRoomId && gate.toRoomId === room.id
-  ));
+  const traversedGate = transition.traversedGate;
   if (traversedGate) {
     if (E2E_ENABLED) e2eState.fastGateTransitions += 1;
     traversedGate.open = false;
     traversedGate.root.visible = true;
-    // Keep both doorway frames in place. The room wall has a four-tile
-    // corridor opening; the frame sections narrow it back to the two-tile gate
-    // opening even while the gate itself is open on the other side.
-    setGateWallFrameVisible(traversedGate, previousRoomId, true);
-    setGateWallFrameVisible(traversedGate, room.id, true);
+    setGateWallFrameVisible(traversedGate, state.currentRoomId, true);
+    setGateWallFrameVisible(traversedGate, transition.roomId, true);
     traversedGate.fromRoomId = null;
     traversedGate.toRoomId = null;
   }
-  state.currentRoomId = room.id;
-  state.discoveredRooms.add(room.id);
-  areaName.textContent = room.label;
-  updateZoneVisibility(room.id, true);
+  state.currentRoomId = transition.roomId;
+  state.discoveredRooms.add(transition.roomId);
+  areaName.textContent = transition.label;
+  updateZoneVisibility(transition.roomId, true);
   if (state.started) {
     playSfx('room');
     addCameraFeedback(0.035, 1.1);
     if (traversedGate) setToast('The gate closes and the previous chamber fades into the dark.');
   }
-}
-
-function runObjectivesComplete() {
-  return evaluateObjectivesComplete({
-    wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
-    livingEnemyCount: countLivingEnemies(),
-  });
-}
-
-function isWalkable(x, z, padding = 0.55) {
-  return isWalkablePoint({ x, z, padding, navigation });
 }
 
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
@@ -2473,6 +2225,60 @@ function chestBlockReason(chest) {
   return evaluateChestBlock({ chest, guardianCount });
 }
 
+// Objective ladder, first match wins. Each row is the full rule for one
+// stage of the delve; adding a stage is a row, not another else-if.
+const OBJECTIVE_LADDER = [
+  {
+    when: () => state.finished,
+    title: 'Delve complete',
+    detail: () => 'The crypt keeps its secrets for another day.',
+  },
+  {
+    when: () => state.failed,
+    title: 'The crypt wins',
+    detail: () => 'Take a breath, then try the route again.',
+  },
+  {
+    when: () => !state.started,
+    title: 'Enter the crypt',
+    detail: () => 'Clear the western and eastern branches to claim their seals.',
+  },
+  {
+    when: () => !state.seals.west || !state.seals.east,
+    title: 'Claim the twin branch seals',
+    detail: () => {
+      const west = state.seals.west ? 'seal claimed' : `${livingEnemiesInBranch('west').length} guardians`;
+      const east = state.seals.east ? 'seal claimed' : `${livingEnemiesInBranch('east').length} guardians`;
+      return `West: ${west}. East: ${east}. Each reliquary opens when its branch is clear.`;
+    },
+  },
+  {
+    when: () => livingEnemiesInBranch('north', { includeWarden: false }).length > 0,
+    title: 'Cross the Silent Archive',
+    detail: () => `${livingEnemiesInBranch('north', { includeWarden: false }).length} northern guardians stand between you and the Archive key.`,
+  },
+  {
+    when: () => !state.archiveKey,
+    title: 'Claim the Archive key',
+    detail: () => 'Open the cache in the Silent Archive to continue into the Warden\'s Keep.',
+  },
+  {
+    when: () => livingEnemiesInRoom('wardenKeep').length > 0,
+    title: 'Defeat the Crypt Warden',
+    detail: () => 'Dodge its slam and Soul Collapse while breaking the dead it calls back.',
+  },
+  {
+    when: () => !chestById('warden-spoils')?.opened,
+    title: 'Claim the Warden\'s spoils',
+    detail: () => 'The final reliquary is no longer warded.',
+  },
+  {
+    when: () => true,
+    title: 'Return to the entrance',
+    detail: () => `${state.openedChests} of ${state.chests.length} caches found. Return through the southern entrance.`,
+  },
+];
+
 function updateQuestUi() {
   if (state.mode === 'town') {
     threatValue.textContent = 'SAFE';
@@ -2482,36 +2288,20 @@ function updateQuestUi() {
   }
   const threats = countLivingEnemies();
   threatValue.textContent = `${threats} ${threats === 1 ? 'REMAINS' : 'REMAIN'}`;
-  if (state.finished) {
-    objective.textContent = 'Delve complete';
-    objectiveDetail.textContent = 'The crypt keeps its secrets for another day.';
-  } else if (state.failed) {
-    objective.textContent = 'The crypt wins';
-    objectiveDetail.textContent = 'Take a breath, then try the route again.';
-  } else if (!state.started) {
-    objective.textContent = 'Enter the crypt';
-    objectiveDetail.textContent = 'Clear the western and eastern branches to claim their seals.';
-  } else if (!state.seals.west || !state.seals.east) {
-    const west = state.seals.west ? 'seal claimed' : `${livingEnemiesInBranch('west').length} guardians`;
-    const east = state.seals.east ? 'seal claimed' : `${livingEnemiesInBranch('east').length} guardians`;
-    objective.textContent = 'Claim the twin branch seals';
-    objectiveDetail.textContent = `West: ${west}. East: ${east}. Each reliquary opens when its branch is clear.`;
-  } else if (livingEnemiesInBranch('north', { includeWarden: false }).length > 0) {
-    objective.textContent = 'Cross the Silent Archive';
-    objectiveDetail.textContent = `${livingEnemiesInBranch('north', { includeWarden: false }).length} northern guardians stand between you and the Archive key.`;
-  } else if (!state.archiveKey) {
-    objective.textContent = 'Claim the Archive key';
-    objectiveDetail.textContent = 'Open the cache in the Silent Archive to continue into the Warden\'s Keep.';
-  } else if (livingEnemiesInRoom('wardenKeep').length > 0) {
-    objective.textContent = 'Defeat the Crypt Warden';
-    objectiveDetail.textContent = 'Dodge its slam and Soul Collapse while breaking the dead it calls back.';
-  } else if (!chestById('warden-spoils')?.opened) {
-    objective.textContent = 'Claim the Warden\'s spoils';
-    objectiveDetail.textContent = 'The final reliquary is no longer warded.';
-  } else {
-    objective.textContent = 'Return to the entrance';
-    objectiveDetail.textContent = `${state.openedChests} of ${state.chests.length} caches found. Return through the southern entrance.`;
-  }
+  const stage = OBJECTIVE_LADDER.find((entry) => entry.when());
+  objective.textContent = stage.title;
+  objectiveDetail.textContent = stage.detail();
+}
+
+// One nearest-of-four scan shared by the interaction prompt and the E key
+// handler. Priority order matches the headless core: loot, chest, gate.
+function interactionCandidate() {
+  const candidates = [
+    { kind: 'loot', item: nearestLootDrop(INTERACT_RADII.loot), id: (drop) => drop.itemId },
+    { kind: 'chest', item: nearestClosedChest(INTERACT_RADII.chest), id: (chest) => chest.id },
+    { kind: 'gate', item: nearestClosedGate(INTERACT_RADII.gate), id: (gate) => gate.corridorId },
+  ];
+  return candidates.find((candidate) => candidate.item) ?? null;
 }
 
 function updateInteractionUi() {
@@ -2532,25 +2322,23 @@ function updateInteractionUi() {
     }
     return;
   }
-  const nearbyLoot = nearestLootDrop(INTERACT_RADII.loot);
-  const nearbyChest = nearestClosedChest(INTERACT_RADII.chest);
-  const nearbyGate = nearestClosedGate(INTERACT_RADII.gate);
-  if (nearbyLoot) {
-    interaction.classList.remove('is-hidden');
-    interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[nearbyLoot.itemId].name.toLowerCase()}`;
-  } else if (nearbyChest) {
-    interaction.classList.remove('is-hidden');
-    interaction.innerHTML = `Press <kbd>E</kbd> to open ${nearbyChest.name.toLowerCase()}`;
-  } else if (nearbyGate) {
-    interaction.classList.remove('is-hidden');
-    const destinationId = nearbyGate.roomIds.find((id) => id !== state.currentRoomId);
+  const candidate = interactionCandidate();
+  if (!candidate) {
+    interaction.classList.add('is-hidden');
+    return;
+  }
+  interaction.classList.remove('is-hidden');
+  if (candidate.kind === 'loot') {
+    interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[candidate.item.itemId].name.toLowerCase()}`;
+  } else if (candidate.kind === 'chest') {
+    interaction.innerHTML = `Press <kbd>E</kbd> to open ${candidate.item.name.toLowerCase()}`;
+  } else {
+    const destinationId = candidate.item.roomIds.find((id) => id !== state.currentRoomId);
     const destination = ZONE_BY_ID.get(destinationId);
     const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
     interaction.innerHTML = remainingEnemies > 0
       ? `Gate sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}`
       : `Press <kbd>E</kbd> to open the way to ${(destination?.label ?? 'the next chamber').toLowerCase()}`;
-  } else {
-    interaction.classList.add('is-hidden');
   }
 }
 
@@ -3062,14 +2850,15 @@ function applyPlayerAction() {
   if (!target || target.dead) return;
 
   const distance = player.root.position.distanceTo(target.root.position);
-  if (action === 'sword' && distance <= 3.45) {
+  if (distance > ACTIONS[action].range) return;
+  // Melee resolves immediately; spells fly as projectiles that apply
+  // their own impact effects on arrival (see updateSpellProjectiles).
+  if (action === 'sword') {
     const damage = playerDamage(attackDamage('sword', target.profileKey), action);
     playSfx('sword');
     applyEnemyDamage(target, damage, 0xe9b36f, `${target.name} takes ${damage} damage.`);
-  } else if (action === 'fire' && distance <= 8.5) {
-    spawnSpellProjectile('fire', target);
-  } else if (action === 'freeze' && distance <= 8.5) {
-    spawnSpellProjectile('freeze', target);
+  } else {
+    spawnSpellProjectile(action, target);
   }
 }
 
@@ -3126,23 +2915,23 @@ function useAction(action, target = selectedTarget) {
     state.combatStarted = true;
     state.weaponReadyTimer = 4.5;
     player.setWeaponSheathed(false);
-    player.attackLock = action === 'sword' ? 0.67 : 0.58;
-    player.attackTimer = action === 'sword' ? 0.24 : SPELL_CAST_TIMES[action];
+    const runtime = ACTION_RUNTIME[action];
+    player.attackLock = runtime.attackLock;
+    player.attackCooldown = runtime.attackCooldown;
+    player.attackTimer = runtime.attackTimer ?? SPELL_CAST_TIMES[action];
     player.attackTarget = target;
     player.pendingAction = action;
     player.face(target.root.position);
-    player.play(action === 'sword'
-      ? ['1h_melee_attack', 'melee_attack', 'attack']
-      : [action === 'fire' ? 'Cast_Fire' : 'Cast_Frost'], { once: true, force: true });
+    player.play(runtime.clips ?? [runtime.castClip], { once: true, force: true });
     if (action !== 'sword') spawnSpellCharge(action);
-    player.attackCooldown = action === 'sword' ? 0.52 : 0.78;
   } else {
-    player.attackLock = action === 'heal' ? 0.62 : 0.56;
-    player.attackCooldown = 0.65;
+    const runtime = ACTION_RUNTIME[action];
+    player.attackLock = runtime.attackLock;
+    player.attackCooldown = runtime.attackCooldown;
     player.attackTimer = SPELL_CAST_TIMES[action];
     player.attackTarget = null;
     player.pendingAction = action;
-    player.play([action === 'heal' ? 'Cast_Heal' : 'Cast_Arcane'], { once: true, force: true });
+    player.play([runtime.castClip], { once: true, force: true });
     spawnSpellCharge(action);
   }
   state.actionCooldowns[action] = actionCooldownFor(action);
@@ -3673,31 +3462,20 @@ function interact() {
     return;
   }
   state.started = true;
-  const nearbyLoot = nearestLootDrop(INTERACT_RADII.loot);
-  if (nearbyLoot) {
-    collectLootDrop(nearbyLoot);
-    if (nearbyLoot.collected) {
-      state.interactionCount += 1;
-      state.lastInteraction = { kind: 'loot', itemId: nearbyLoot.itemId };
-    }
-    return;
-  }
-  const nearbyChest = nearestClosedChest(INTERACT_RADII.chest);
-  if (nearbyChest) {
-    openChest(nearbyChest);
-    if (nearbyChest.opened) {
-      state.interactionCount += 1;
-      state.lastInteraction = { kind: 'chest', id: nearbyChest.id };
-    }
-    return;
-  }
-  const nearbyGate = nearestClosedGate(INTERACT_RADII.gate);
-  if (nearbyGate) {
-    openGate(nearbyGate);
-    if (nearbyGate.open) {
-      state.interactionCount += 1;
-      state.lastInteraction = { kind: 'gate', id: nearbyGate.corridorId };
-    }
+  const candidate = interactionCandidate();
+  if (!candidate) return;
+  if (candidate.kind === 'loot') collectLootDrop(candidate.item);
+  else if (candidate.kind === 'chest') openChest(candidate.item);
+  else openGate(candidate.item);
+
+  const resolved = {
+    loot: () => (candidate.item.collected ? { kind: 'loot', id: candidate.item.itemId } : null),
+    chest: () => (candidate.item.opened ? { kind: 'chest', id: candidate.item.id } : null),
+    gate: () => (candidate.item.open ? { kind: 'gate', id: candidate.item.corridorId } : null),
+  }[candidate.kind]();
+  if (resolved) {
+    state.interactionCount += 1;
+    state.lastInteraction = resolved;
   }
 }
 
