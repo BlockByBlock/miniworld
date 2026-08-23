@@ -68,7 +68,7 @@ Stable world content lives in [src/data/world.json](./src/data/world.json) and i
 The game rules are split from the 3D presentation:
 
 - `src/game/world-rules.js` — pure, shared gameplay decisions (gate/chest gating, chest rewards, loot table, damage math, win condition). Both the rendered game and the headless core import these, so there is one definition of each rule.
-- `src/game/game-core.js` — a headless simulation (`createGameCore({ seed })`) with injectable RNG and world data. Agents drive it through semantic actions (`talkTo`, `moveTo`, `interact`, `openGate`, `useAction`), advance time explicitly with `tick(delta)`, save/restore `saveCheckpoint()`/`loadCheckpoint()`, and read structured state via `describe()` and an event log.
+- `src/game/game-core.js` — a fully deterministic headless simulation (`createGameCore({ worldData })`). Agents drive it through semantic actions (`talkTo`, `moveTo`, `interact`, `openGate`, `useAction`, `equip`) instead of keyboard or mouse input, advance time explicitly with `tick(delta)`, save/restore checkpoints mid-run for controlled start states, and read structured state via `describe()` and an event log. Room-clearing during agent routes may use the explicit `clearRoom()` test affordance (an accelerated stand-in for combat); the warden fight itself is fought through semantic `useAction` calls.
 - `src/main.js` — rendering, animation, audio, input, and UI; it delegates gameplay decisions to the shared rules.
 
 Run a full New Game-to-victory delve headlessly (no browser) with `npm run test:headless`.

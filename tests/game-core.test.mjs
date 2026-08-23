@@ -2,10 +2,9 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
 import { createGameCore } from '../src/game/game-core.js';
-import { createRng } from '../src/game/rng.js';
 
-function freshCore(seed = 7) {
-  const core = createGameCore({ seed });
+function freshCore() {
+  const core = createGameCore();
   core.startNewGame();
   return core;
 }
@@ -16,14 +15,6 @@ function enterDungeon(core) {
   core.tick(1.0);
   assert.equal(core.describe().mode, 'dungeon');
 }
-
-test('rng is deterministic for a given seed', () => {
-  const a = createRng(42);
-  const b = createRng(42);
-  for (let index = 0; index < 10; index += 1) {
-    assert.equal(a(), b());
-  }
-});
 
 test('a new game starts in town with full health and empty packs', () => {
   const core = freshCore();
@@ -48,6 +39,21 @@ test('talking to the hunter enters the dungeon after the trail delay', () => {
   enterDungeon(core);
   assert.ok(core.getEvents().some((event) => event.type === 'dungeon-entered'));
 });
+test('evaluateChestBlock wards every kind on its resolved guardian count', async () => {
+  const { evaluateChestBlock } = await import('../src/game/world-rules.js');
+  const chest = (kind, branch = null) => ({ kind, branch, opened: false });
+  // A wrong wiring (e.g. passing an unknown count key) resolves to 0 and
+  // silently opens warded chests — each kind must block while guarded.
+  for (const kind of ['seal', 'archive', 'final', 'cache']) {
+    assert.match(
+      evaluateChestBlock({ chest: chest(kind, 'west'), guardianCount: 2 }),
+      /warded|sealed|bound|Clear this chamber/,
+      `${kind} must stay blocked with guardians alive`,
+    );
+    assert.equal(evaluateChestBlock({ chest: chest(kind, 'west'), guardianCount: 0 }), '');
+  }
+});
+
 test('gates refuse to open while their room holds living guardians', () => {
   const core = freshCore();
   enterDungeon(core);
@@ -91,7 +97,7 @@ test('seal chests stay warded until their whole branch is cleared', () => {
 });
 
 test('checkpoints restore an identical mid-run state', () => {
-  const core = freshCore(11);
+  const core = freshCore();
   enterDungeon(core);
   core.openGate('entry-corridor');
   core.moveTo(0, 12.5);
@@ -110,7 +116,7 @@ test('checkpoints restore an identical mid-run state', () => {
 });
 
 test('full delve: New Game to victory using only semantic actions', () => {
-  const core = freshCore(42);
+  const core = freshCore();
   enterDungeon(core); // talkTo('Hunter') + tick
   const open = (corridorId) => {
     const outcome = core.openGate(corridorId);
@@ -176,7 +182,7 @@ test('full delve: New Game to victory using only semantic actions', () => {
     const swing = core.useAction('fire', 'crypt-warden');
     if (!swing.ok && swing.reason === 'cooldown') core.tick(swing.remaining);
     else assert.equal(swing.ok, true, `attack failed: ${swing.reason}`);
-    if (guard += 1 > 400) assert.fail('warden fight did not converge');
+    if (++guard > 400) assert.fail('warden fight did not converge');
   }
   core.clearRoom('wardenKeep');
 
@@ -224,9 +230,9 @@ test('the loss path is exercisable: standing in a living room gets you killed', 
   assert.ok(core.getEvents().some((event) => event.type === 'run-finished' && event.success === false));
 });
 
-test('same seed produces identical event logs across runs', () => {
+test('replaying the same actions produces identical event logs', () => {
   const run = () => {
-    const core = freshCore(5);
+    const core = freshCore();
     enterDungeon(core);
     core.moveTo(0, 12.5);
     core.clearRoom('hub');
@@ -236,7 +242,7 @@ test('same seed produces identical event logs across runs', () => {
 });
 
 test('victory requires objectives complete AND standing at the exit', () => {
-  const core = freshCore(3);
+  const core = freshCore();
   enterDungeon(core);
   const view = core.describe();
   assert.equal(view.objectives.complete, false);

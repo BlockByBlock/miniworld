@@ -24,6 +24,7 @@ import {
   INTERACT_RADII,
   applyChestRewards,
   attackDamage,
+  computeZoneNeighbors,
   evaluateChestBlock,
   evaluateGateOpen,
   isRunVictory,
@@ -116,17 +117,7 @@ MAP.zones = [...MAP.rooms, ...MAP.corridors];
 const corridorZones = new Set(MAP.corridors);
 const ZONE_BY_ID = new Map(MAP.zones.map((zone) => [zone.id, zone]));
 const ROOM_IDS = new Set(MAP.rooms.map((room) => room.id));
-const ZONE_NEIGHBORS = new Map(MAP.zones.map((zone) => {
-  const neighbors = MAP.zones
-    .filter((candidate) => candidate !== zone)
-    .filter((candidate) => {
-      const overlapX = Math.min(zone.maxX, candidate.maxX) - Math.max(zone.minX, candidate.minX);
-      const overlapZ = Math.min(zone.maxZ, candidate.maxZ) - Math.max(zone.minZ, candidate.minZ);
-      return overlapX >= -0.05 && overlapZ >= -0.05 && (overlapX > 0.5 || overlapZ > 0.5);
-    })
-    .map((candidate) => candidate.id);
-  return [zone.id, neighbors];
-}));
+const ZONE_NEIGHBORS = computeZoneNeighbors(MAP.zones);
 
 const state = {
   loaded: false,
@@ -2343,14 +2334,10 @@ function createLootVisual(itemId, position) {
   return drop;
 }
 
-function lootItemForEnemy(enemy) {
-  return lootItemForProfile(enemy.profileKey);
-}
-
 function spawnLootDrop(enemy) {
   if (enemy.lootDropped) return;
   enemy.lootDropped = true;
-  const itemId = lootItemForEnemy(enemy);
+  const itemId = lootItemForProfile(enemy.profileKey);
   createLootVisual(itemId, enemy.root.position);
   spawnCombatText(enemy.root.position, 'LOOT', ITEM_DEFS[itemId].color, enemy.height + 0.55);
 }
@@ -2478,12 +2465,12 @@ function openGate(gate) {
 
 function chestBlockReason(chest) {
   if (!chest || chest.opened) return '';
-  const countArgs = chest.kind === 'seal'
-    ? { branchGuardianCount: livingEnemiesInBranch(chest.branch).length }
+  const guardianCount = chest.kind === 'seal'
+    ? livingEnemiesInBranch(chest.branch).length
     : chest.kind === 'archive'
-      ? { branchGuardianCount: livingEnemiesInBranch('north', { includeWarden: false }).length }
-      : { roomGuardianCount: livingEnemiesInRoom(chest.roomId).length };
-  return evaluateChestBlock({ chest, ...countArgs });
+      ? livingEnemiesInBranch('north', { includeWarden: false }).length
+      : livingEnemiesInRoom(chest.roomId).length;
+  return evaluateChestBlock({ chest, guardianCount });
 }
 
 function updateQuestUi() {

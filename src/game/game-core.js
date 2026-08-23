@@ -1,9 +1,9 @@
 // Headless simulation of Forgotten Crypt.
 //
 // The same rules that drive the rendered game (src/main.js) run here on
-// plain JavaScript state: no THREE, no DOM, no audio, no rAF, no setTimeout.
-// Time passes only when the caller calls tick(delta); randomness comes from
-// an injectable seeded RNG; the world definition is injectable too.
+// plain JavaScript state: no THREE, no DOM, no audio, no rAF, no setTimeout,
+// and no randomness — every rule is deterministic. Time passes only when the
+// caller calls tick(delta); the world definition is injectable too.
 //
 // Agents and tests drive the simulation through semantic actions
 // (talkTo / moveTo / interact / openGate / useAction) instead of keyboard,
@@ -11,7 +11,6 @@
 // saveCheckpoint/loadCheckpoint give controlled start states mid-run.
 
 import { WORLD_DATA } from '../world-data.js';
-import { createRng } from './rng.js';
 import {
   createNavigationContext,
   isWalkablePoint,
@@ -35,11 +34,8 @@ const MOVE_ARRIVE_DISTANCE = 0.35;
 const MOVE_TICK_SECONDS = 0.1;
 
 export function createGameCore({
-  seed = 1,
   worldData = WORLD_DATA,
 } = {}) {
-  const rng = createRng(seed);
-  const currentSeed = seed;
   const map = worldData.map;
   const zones = [...map.rooms, ...map.corridors];
   const corridorZoneIds = new Set(map.corridors);
@@ -257,7 +253,7 @@ export function createGameCore({
   function startNewGame() {
     Object.assign(state, makeState());
     events = [];
-    record('game-started', { seed: currentSeed });
+    record('game-started');
     return { ok: true };
   }
 
@@ -340,34 +336,6 @@ export function createGameCore({
       return { ok: false, reason: 'not-in-dungeon' };
     }
     return attemptGateOpen(gateByCorridor(corridorId));
-  }
-
-  function openChestOutcome(chest) {
-    let blockedReason = '';
-    if (chest.kind === 'seal') {
-      blockedReason = evaluateChestBlock({
-        chest,
-        branchGuardianCount: livingEnemiesInBranch(chest.branch).length,
-      });
-    } else if (chest.kind === 'archive') {
-      blockedReason = evaluateChestBlock({
-        chest,
-        branchGuardianCount: livingEnemiesInBranch('north', { includeWarden: false }).length,
-      });
-    } else {
-      blockedReason = evaluateChestBlock({
-        chest,
-        roomGuardianCount: livingEnemiesInRoom(chest.roomId).length,
-      });
-    }
-    if (blockedReason) {
-      record('chest-blocked', { chestId: chest.id, reason: blockedReason });
-      return { ok: false, reason: blockedReason };
-    }
-    chest.opened = true;
-    const summary = applyChestRewards(state, chest, actionKeys);
-    record('chest-opened', { chestId: chest.id, kind: summary.kind, healed: summary.healed });
-    return { ok: true, summary };
   }
 
   function collectLoot(drop) {

@@ -3,28 +3,26 @@
 //
 // Drives the full game from New Game to victory through semantic actions on
 // the headless core — no browser, no rendering, no keyboard/mouse, no
-// frame-rate dependence. Deterministic for a given --seed.
+// frame-rate dependence. Fully deterministic: the same commands always
+// produce the same run.
 //
 // Usage:
-//   node tools/crypt-headless.mjs [--seed 42] [--quiet]
+//   node tools/crypt-headless.mjs [--quiet]
 
 import { parseArgs } from 'node:util';
-import process from 'node:process';
 import { createGameCore } from '../src/game/game-core.js';
 
 const { values } = parseArgs({
   options: {
-    seed: { type: 'string', default: '42' },
     quiet: { type: 'boolean', default: false },
   },
 });
 
 const log = (...args) => { if (!values.quiet) console.log(...args); };
-const seed = Number.parseInt(values.seed, 10);
 
-const core = createGameCore({ seed });
+const core = createGameCore();
 core.startNewGame();
-log(`# new game (seed ${seed})`);
+log('# new game');
 
 // Semantic New Game path: talk to the hunter, let the trail timer run.
 if (!core.talkTo('Hunter').ok) throw new Error('could not talk to Ranger Rowan');
@@ -134,7 +132,6 @@ core.tick(0.1);
 
 const view = core.describe();
 const result = {
-  seed,
   finished: view.finished,
   objectives: view.objectives,
   elapsedSimSeconds: Number(view.elapsed.toFixed(1)),
@@ -143,7 +140,7 @@ const result = {
   chestOpenings: view.openedChests,
   events: core.getEvents().length,
   restoredFromEntryCheckpointWorks: (() => {
-    const probe = createGameCore({ seed });
+    const probe = createGameCore();
     probe.startNewGame();
     probe.loadCheckpoint(entryCheckpoint);
     return probe.describe().mode === 'dungeon' && !probe.describe().finished;
