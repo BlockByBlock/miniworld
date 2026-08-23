@@ -122,7 +122,7 @@ recording is inert until `__cryptRun()` activates the profile.
 
 ## Verification checklist (all passing at handover)
 
-- [x] `npm test` — 19/19 pass (15 restored contracts + 4 optimization contracts)
+- [x] `npm test` — passing (counts have since grown; see the PR for current totals)
 - [x] `npm run build` — green, bundle ~795 KB JS (217 KB gzip)
 - [x] Draw calls and program counts identical baseline vs after
 - [x] `node --check src/main.js` and `git diff --check` — green

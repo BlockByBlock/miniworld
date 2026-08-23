@@ -62,4 +62,3 @@ test('fails a profiling route step when the target is unreachable', async () => 
   );
   assert.deepEqual(target, { x: 1, z: 1 });
 });
-

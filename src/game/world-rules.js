@@ -7,6 +7,7 @@
 export const EXIT_POSITION = { x: 0, z: 32.4 };
 export const EXIT_RADIUS = 2.4;
 export const HEAL_FRACTION = 0.3;
+export const CONSUMABLE_HEAL = 30;
 
 // Interaction reach per target kind, shared so both surfaces agree.
 export const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };

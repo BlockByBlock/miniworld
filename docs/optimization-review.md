@@ -212,7 +212,7 @@ follow-up pass. The review findings were addressed in this follow-up pass:
 |---|---|---|
 | Profiling allocated and recorded during normal play | Profile state now starts as `null`; recording is active only inside `__cryptRun()` and is disabled in `finally`. Route failures set `__cryptError` and still set `__cryptDone`. | `tests/optimization-contracts.test.mjs`, `node --check src/main.js` |
 | Scripted route targeted the wrong town NPC and ignored failed steps | Route resolves Ranger Rowan by role, uses the actual corridor IDs, opens each gate through the real progression path, and rejects unreachable targets instead of continuing. | `waitForProfileTarget` contract test; browser profile still pending |
-| Four-light pool dropped the fifth visible recipe | Pool capacity is five, matching the hub's four lights plus one adjacent room; the collector rejects future overflow instead of truncating it. | five-light capacity contract test |
+| Four-light pool dropped the fifth visible recipe | Pool capacity is five, matching the hub's four lights plus one adjacent room; future overflow truncates gracefully to capacity instead of crashing the render loop. | five-light capacity contract test |
 | Ponytail complexity findings | Removed unused camera-direction work, replaced the nested route/ignored-success flow with small checked helpers, inlined the one-use light default, and kept pooled slot reuse in one ring-order helper. | `git diff --check`; focused helper tests |
 
 The follow-up adds `src/optimization-contracts.js` and
@@ -305,6 +305,11 @@ world content, or visual output changed.
 
 ### Measured comparison (headless Chrome, Metal, 1440×900, identical route)
 
+> **Historical measurement.** These numbers predate the later route fixes
+> (the scripted path now crosses the real gates). Treat them as directional
+> evidence for the pooling work, not as a current conclusion; a fresh CDP
+> profile on the corrected route is still pending.
+
 | Metric | Baseline | Optimized | Delta |
 |---|---|---|---|
 | Frames > 30 ms | 3 (up to 78.6 ms) | **0** | eliminated |
@@ -317,7 +322,7 @@ The remaining 19.4 ms worst case is normal vsync jitter at a locked 60 Hz.
 Median is pinned at the display refresh interval in both runs, as expected for
 a vsync-bound workload; draw calls and program counts confirm rendering output
 is unchanged. The headline result: room-entry spikes (finding A) and combat
-GC pressure (finding C) no longer produce dropped frames.
+GC pressure (finding C) no longer produced dropped frames on that historical route.
 
 ### Deferred (unchanged from revised plan)
 

@@ -58,6 +58,7 @@ const interact = (what) => {
 const entryCheckpoint = core.saveCheckpoint();
 
 // West branch.
+open('entry-corridor');
 walk(0, 12.5);
 open('west-corridor');
 walk(-26, 9);
@@ -70,7 +71,8 @@ walk(-47, -13);
 core.clearRoom('westOssuary');
 interact('west seal claimed');
 
-// East branch.
+// East branch (gates close behind each traversal — reopen as we go).
+open('west-drop');
 walk(-47, 9);
 open('west-deep-corridor');
 walk(-26, 9);
@@ -88,6 +90,7 @@ core.clearRoom('eastReliquary');
 interact('east seal claimed');
 
 // North branch.
+open('east-drop');
 walk(47, 9);
 open('east-deep-corridor');
 walk(26, 9);

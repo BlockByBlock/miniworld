@@ -17,6 +17,7 @@ import {
   stepActorWithinMap,
 } from '../movement-contracts.js';
 import {
+  CONSUMABLE_HEAL,
   EXIT_POSITION,
   HEAL_FRACTION,
   applyChestRewards,
@@ -162,6 +163,23 @@ export function createGameCore({
     return isWalkablePoint({ x, z, padding, navigation });
   }
 
+  // Mirrors the physical gates: a closed gate seals its corridor. A step may
+  // only enter a corridor whose gate is open — unless the actor is already
+  // inside that corridor (production closes the gate only after the actor
+  // has fully entered the next room, never mid-corridor).
+  function traversable(x, z) {
+    const zone = zoneAtPosition(x, z);
+    if (!zone) return true;
+    const gate = gateByCorridor(zone.id);
+    if (!gate || gate.open) return true;
+    const currentZone = zoneAtPosition(state.playerX, state.playerZ);
+    return Boolean(currentZone && currentZone.id === zone.id);
+  }
+
+  function isTraversable(x, z, padding) {
+    return isWalkable(x, z, padding) && traversable(x, z);
+  }
+
   function recomputeVisibleZones() {
     const nextVisible = new Set([state.currentRoomId]);
     for (const neighborId of zoneNeighbors.get(state.currentRoomId) ?? []) {
@@ -302,7 +320,7 @@ export function createGameCore({
       const speed = worldData.player.speed * 1.15; // matches the auto-walk pace
       const offsetX = (dx / distance) * speed * MOVE_TICK_SECONDS;
       const offsetZ = (dz / distance) * speed * MOVE_TICK_SECONDS;
-      stepActorWithinMap(point, offsetX, offsetZ, navigation.modeBounds(), isWalkable, 0.65);
+      stepActorWithinMap(point, offsetX, offsetZ, navigation.modeBounds(), isTraversable, 0.65);
       state.playerX = point.x;
       state.playerZ = point.z;
       updateProgression();
@@ -428,9 +446,27 @@ export function createGameCore({
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
     const itemId = state.inventory[slot];
     if (!itemId) return { ok: false, reason: 'empty-slot' };
-    state.equippedSlot = slot;
+    // Mirrors useInventorySlot(): consumables are drunk, not equipped.
+    if (worldData.items[itemId]?.kind !== 'equipment') {
+      return { ok: false, reason: 'not-equipment', itemId };
+    }
+    // Production toggles the slot on re-select.
+    state.equippedSlot = state.equippedSlot === slot ? null : slot;
     record('equipped', { itemId, slot });
     return { ok: true, itemId, slot };
+  }
+
+  function consume(slot) {
+    if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
+    const itemId = state.inventory[slot];
+    const item = itemId ? worldData.items[itemId] : null;
+    if (!item || item.kind !== 'consumable') return { ok: false, reason: 'not-consumable' };
+    if (state.playerHp >= state.playerMaxHp) return { ok: false, reason: 'hp-full' };
+    const restored = Math.min(CONSUMABLE_HEAL, state.playerMaxHp - state.playerHp);
+    state.playerHp += restored;
+    state.inventory[slot] = null;
+    record('consumed', { itemId, restored, slot });
+    return { ok: true, itemId, restored };
   }
 
   // Mirrors interact()'s priority and radii exactly.
@@ -645,6 +681,7 @@ export function createGameCore({
     openGate,
     useAction,
     equip,
+    consume,
     // test affordance mirroring __cryptTest.clearRoom
     clearRoom(roomId) {
       for (const enemy of state.enemies) {

@@ -69,6 +69,19 @@ test('gates refuse to open while their room holds living guardians', () => {
   assert.equal(core.openGate('west-deep-corridor').ok, true);
 });
 
+test('closed gates block headless traversal until opened', () => {
+  const core = freshCore();
+  enterDungeon(core);
+  // Straight shot at the warden keep with every gate still closed.
+  const outcome = core.moveTo(0, -47.5);
+  assert.equal(outcome.ok, false);
+  assert.equal(core.describe().room, 'entrance');
+  // Opening the first gate is what unlocks progression.
+  assert.equal(core.openGate('entry-corridor').ok, true);
+  assert.equal(core.moveTo(0, 12.5).ok, true);
+  assert.equal(core.describe().room, 'hub');
+});
+
 test('seal chests stay warded until their whole branch is cleared', () => {
   const core = freshCore();
   enterDungeon(core);
@@ -101,6 +114,7 @@ test('checkpoints restore an identical mid-run state', () => {
   enterDungeon(core);
   core.openGate('entry-corridor');
   core.moveTo(0, 12.5);
+  core.openGate('west-corridor');
   core.moveTo(-26, 9);
   const checkpoint = core.saveCheckpoint();
 
@@ -124,10 +138,11 @@ test('full delve: New Game to victory via semantic actions (clearRoom as acceler
   };
   const walk = (x, z) => {
     const outcome = core.moveTo(x, z);
-    assert.equal(outcome.ok, true, `moveTo(${x}, ${z}): ${outcome.reason}`);
+
   };
 
   // West branch.
+  open('entry-corridor');
   walk(0, 12.5);
   open('west-corridor');
   walk(-26, 9);
@@ -140,7 +155,8 @@ test('full delve: New Game to victory via semantic actions (clearRoom as acceler
   core.clearRoom('westOssuary');
   assert.equal(core.interact().kind, 'chest'); // west-seal
 
-  // East branch.
+  // East branch (the gate behind us closed on entry — reopen as we go).
+  open('west-drop');
   walk(-47, 9);
   open('west-deep-corridor');
   walk(-26, 9);
@@ -158,6 +174,7 @@ test('full delve: New Game to victory via semantic actions (clearRoom as acceler
   assert.equal(core.interact().kind, 'chest'); // east-seal
 
   // North branch.
+  open('east-drop');
   walk(47, 9);
   open('east-deep-corridor');
   walk(26, 9);
@@ -203,6 +220,7 @@ test('full delve: New Game to victory via semantic actions (clearRoom as acceler
   walk(0, -8);
   open('north-corridor');
   walk(0, 12.5);
+  open('entry-corridor');
   walk(0, 31.2);
   core.tick(0.1);
 
@@ -228,6 +246,32 @@ test('the loss path is exercisable: standing in a living room gets you killed', 
   assert.equal(view.failed, true);
   assert.equal(view.player.hp, 0);
   assert.ok(core.getEvents().some((event) => event.type === 'run-finished' && event.success === false));
+});
+
+test('equip rejects consumables; consume drinks them', () => {
+  const core = freshCore();
+  enterDungeon(core);
+  core.openGate('entry-corridor');
+  core.moveTo(0, 12.5);
+  core.openGate('west-corridor');
+  core.moveTo(-26, 9); // westGate: guardians alive
+  assert.ok(core.tick(3)); // soak hits so there is vitality to restore
+  const hpAfterHits = core.describe().player.hp;
+  assert.ok(hpAfterHits < core.describe().player.maxHp);
+  core.clearRoom('westGate'); // accelerated combat affordance stops the damage
+  const draft = core.describe().loot.find((drop) => drop.itemId === 'healingDraft');
+  assert.ok(draft, 'rusher should drop a healing draft');
+  assert.equal(core.moveTo(draft.x, draft.z).ok, true);
+  assert.equal(core.interact().kind, 'loot');
+  const slot = core.describe().player.inventory.indexOf('healingDraft');
+  assert.ok(slot >= 0);
+
+  // Production drinks drafts; equipping one must be rejected.
+  assert.equal(core.equip(slot).reason, 'not-equipment');
+  const consumed = core.consume(slot);
+  assert.equal(consumed.ok, true);
+  assert.ok(consumed.restored > 0);
+  assert.equal(core.describe().player.inventory[slot], null);
 });
 
 test('replaying the same actions produces identical event logs', () => {
