@@ -8,13 +8,16 @@ export const EXIT_POSITION = { x: 0, z: 32.4 };
 export const EXIT_RADIUS = 2.4;
 export const HEAL_FRACTION = 0.3;
 
+// Interaction reach per target kind, shared so both surfaces agree.
+export const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
+
 // --- Gates ---------------------------------------------------------------
 
 // Mirrors openGate(): a gate opens only from one of its two rooms and only
 // once that room holds no living guardians.
 export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
-  if (!gate || gate.open) return { ok: false, reason: 'missing-or-open' };
-  if (!gate.roomIds.includes(currentRoomId)) return { ok: false, reason: 'not-in-room' };
+  if (!gate || gate.open) return { ok: false, reason: '' };
+  if (!gate.roomIds.includes(currentRoomId)) return { ok: false, reason: '' };
   if (livingInRoomCount > 0) {
     return {
       ok: false,
@@ -25,25 +28,21 @@ export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
 }
 
 // --- Chests --------------------------------------------------------------
-
-// Mirrors chestBlockReason(): callers resolve the relevant living-enemy
-// counts for the chest kind before asking.
-export function evaluateChestBlock({
-  chest,
-  branchGuardianCount = 0,
-  roomGuardianCount = 0,
-}) {
+// Mirrors chestBlockReason(): the caller resolves the relevant living-enemy
+// count for the chest kind, this only turns it into a display reason.
+export function evaluateChestBlock({ chest, guardianCount = 0 }) {
   if (!chest || chest.opened) return '';
-  if (chest.kind === 'seal' && branchGuardianCount > 0) {
-    return `The ${chest.branch}ern seal remains warded by ${branchGuardianCount} guardian${branchGuardianCount === 1 ? '' : 's'}.`;
+  if (chest.kind === 'seal' && guardianCount > 0) {
+    return `The ${chest.branch}ern seal remains warded by ${guardianCount} guardian${guardianCount === 1 ? '' : 's'}.`;
   }
-  if (chest.kind === 'archive' && branchGuardianCount > 0) {
+  if (chest.kind === 'archive' && guardianCount > 0) {
     return 'The Archive cache remains sealed while its acolytes stand.';
   }
-  if ((chest.kind === 'final' || chest.kind === 'cache') && roomGuardianCount > 0) {
-    return chest.kind === 'final'
-      ? 'The Warden\'s reliquary is still bound to the living dead.'
-      : 'Clear this chamber before opening its cache.';
+  if (chest.kind === 'final' && guardianCount > 0) {
+    return 'The Warden\'s reliquary is still bound to the living dead.';
+  }
+  if (chest.kind === 'cache' && guardianCount > 0) {
+    return 'Clear this chamber before opening its cache.';
   }
   return '';
 }
@@ -103,8 +102,6 @@ export function computeZoneNeighbors(zones) {
     return [zone.id, neighbors];
   }));
 }
-
- // --- Run objectives / win condition --------------------------------------
 
 export function playerDamage(baseDamage, { buffed = false, itemMultiplier = 1 } = {}) {
   return Math.round(baseDamage * (buffed ? 1.4 : 1) * itemMultiplier);

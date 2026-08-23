@@ -25,6 +25,7 @@ import {
   computeZoneNeighbors,
   evaluateChestBlock,
   evaluateGateOpen,
+  INTERACT_RADII,
   isRunVictory,
   lootItemForProfile,
   playerDamage,
@@ -33,7 +34,6 @@ import {
 const MOVE_ARRIVE_DISTANCE = 0.35;
 const MOVE_TICK_SECONDS = 0.1;
 
-const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
 export function createGameCore({
   seed = 1,
   worldData = WORLD_DATA,
@@ -115,7 +115,6 @@ export function createGameCore({
         };
       }),
       gates: map.corridors.map((corridor) => ({
-        id: `${corridor.id}-gate`,
         corridorId: corridor.id,
         roomIds: [...corridor.connects],
         open: false,
@@ -248,8 +247,6 @@ export function createGameCore({
       x: enemy.x,
       z: enemy.z,
       collected: false,
-      // Cosmetic bobbing phase; drawn from the seeded RNG so runs reproduce.
-      phase: rng() * Math.PI * 2,
     };
     state.loot.push(drop);
     record('loot-dropped', { itemId, from: enemy.id });
@@ -383,6 +380,23 @@ export function createGameCore({
     state.inventory[slot] = drop.itemId;
     record('loot-collected', { itemId: drop.itemId, slot });
     return { ok: true, itemId: drop.itemId, slot };
+  }
+
+  function openChestOutcome(chest) {
+    const guardianCount = chest.kind === 'seal'
+      ? livingEnemiesInBranch(chest.branch).length
+      : chest.kind === 'archive'
+        ? livingEnemiesInBranch('north', { includeWarden: false }).length
+        : livingEnemiesInRoom(chest.roomId).length;
+    const blockedReason = evaluateChestBlock({ chest, guardianCount });
+    if (blockedReason) {
+      record('chest-blocked', { chestId: chest.id, reason: blockedReason });
+      return { ok: false, reason: blockedReason };
+    }
+    chest.opened = true;
+    const summary = applyChestRewards(state, chest, actionKeys);
+    record('chest-opened', { chestId: chest.id, kind: summary.kind, healed: summary.healed });
+    return { ok: true, summary };
   }
 
   function killEnemy(target, action, damage) {
@@ -649,7 +663,6 @@ export function createGameCore({
       },
       interactionCount: state.interactionCount,
       lastInteraction: state.lastInteraction ? { ...state.lastInteraction } : null,
-      events: events.slice(-20),
     });
   }
 

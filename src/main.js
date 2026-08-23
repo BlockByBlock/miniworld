@@ -21,6 +21,7 @@ import { WORLD_DATA } from './world-data.js';
 import {
   EXIT_POSITION,
   HEAL_FRACTION,
+  INTERACT_RADII,
   applyChestRewards,
   attackDamage,
   evaluateChestBlock,
@@ -2447,7 +2448,7 @@ function openGate(gate) {
     livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
   });
   if (!verdict.ok) {
-    if (verdict.reason.startsWith('The gate is sealed')) setToast(verdict.reason, 1800);
+    if (verdict.reason) setToast(verdict.reason, 1800);
     return;
   }
   for (const otherGate of state.gates) {
@@ -2532,7 +2533,7 @@ function updateInteractionUi() {
     return;
   }
   if (state.mode === 'town') {
-    const nearbyNpc = nearestTownNpc(2.45);
+    const nearbyNpc = nearestTownNpc(INTERACT_RADII.npc);
     if (state.teleporting) {
       interaction.classList.remove('is-hidden');
       interaction.textContent = 'The hunter is opening the crypt path…';
@@ -2544,9 +2545,9 @@ function updateInteractionUi() {
     }
     return;
   }
-  const nearbyLoot = nearestLootDrop(1.9);
-  const nearbyChest = nearestClosedChest(2.1);
-  const nearbyGate = nearestClosedGate(2.4);
+  const nearbyLoot = nearestLootDrop(INTERACT_RADII.loot);
+  const nearbyChest = nearestClosedChest(INTERACT_RADII.chest);
+  const nearbyGate = nearestClosedGate(INTERACT_RADII.gate);
   if (nearbyLoot) {
     interaction.classList.remove('is-hidden');
     interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[nearbyLoot.itemId].name.toLowerCase()}`;
@@ -3676,7 +3677,7 @@ function openChest(chest) {
 function interact() {
   if (!state.loaded || state.finished || state.failed) return;
   if (state.mode === 'town') {
-    const nearbyNpc = nearestTownNpc(2.45);
+    const nearbyNpc = nearestTownNpc(INTERACT_RADII.npc);
     if (nearbyNpc && !state.teleporting) {
       state.interactionCount += 1;
       state.lastInteraction = { kind: 'npc', id: nearbyNpc.name };
@@ -3685,7 +3686,7 @@ function interact() {
     return;
   }
   state.started = true;
-  const nearbyLoot = nearestLootDrop(1.9);
+  const nearbyLoot = nearestLootDrop(INTERACT_RADII.loot);
   if (nearbyLoot) {
     collectLootDrop(nearbyLoot);
     if (nearbyLoot.collected) {
@@ -3694,7 +3695,7 @@ function interact() {
     }
     return;
   }
-  const nearbyChest = nearestClosedChest(2.1);
+  const nearbyChest = nearestClosedChest(INTERACT_RADII.chest);
   if (nearbyChest) {
     openChest(nearbyChest);
     if (nearbyChest.opened) {
@@ -3703,7 +3704,7 @@ function interact() {
     }
     return;
   }
-  const nearbyGate = nearestClosedGate(2.4);
+  const nearbyGate = nearestClosedGate(INTERACT_RADII.gate);
   if (nearbyGate) {
     openGate(nearbyGate);
     if (nearbyGate.open) {
