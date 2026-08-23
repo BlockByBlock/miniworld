@@ -106,10 +106,6 @@ const ACTION_BY_KEY = new Map(
   Object.entries(ACTION_BAR_KEYS).flatMap(([action, codes]) => codes.map((code) => [code, action])),
 );
 
-// Per-action runtime constants that are presentation/timing concerns rather
-// than world data: windup locks, recovery, cast clips, and resolve behavior.
-// One row per action instead of ternaries scattered through useAction and
-// applyPlayerAction.
 const SPELL_COLORS = Object.fromEntries(Object.entries(WORLD_DATA.actions)
   .filter(([, action]) => action.spellColor)
   .map(([id, action]) => [id, action.spellColor]));
