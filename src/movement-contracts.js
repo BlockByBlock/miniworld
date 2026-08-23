@@ -1,7 +1,7 @@
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 export function createNavigationContext({
-  mode,
+  getMode,
   townBounds,
   worldBounds,
   mapZones,
@@ -10,13 +10,18 @@ export function createNavigationContext({
   townStaticColliders,
 }) {
   return {
-    mode,
+    getMode,
     townBounds,
     worldBounds,
     mapZones,
     corridorZoneIds,
     staticColliders,
     townStaticColliders,
+    // Maps the game mode onto walk bounds from the live mode getter, so
+    // bounds can never go stale the way a copied `mode` field would.
+    modeBounds() {
+      return getMode() === 'town' ? townBounds : worldBounds;
+    },
   };
 }
 
@@ -46,7 +51,7 @@ function pointHitsCollider(x, z, colliders, padding) {
 }
 
 export function isWalkablePoint({ x, z, padding = 0.55, navigation }) {
-  if (navigation.mode === 'town') {
+  if (navigation.getMode() === 'town') {
     if (!pointInBounds(x, z, navigation.townBounds, padding)) return false;
     return !pointHitsCollider(x, z, navigation.townStaticColliders, padding);
   }

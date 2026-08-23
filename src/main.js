@@ -176,7 +176,7 @@ const lootDrops = [];
 const zoneRenderGroups = new Map();
 const visibleZoneIds = new Set();
 const navigation = createNavigationContext({
-  mode: state.mode,
+  getMode: () => state.mode,
   townBounds: TOWN_WORLD,
   worldBounds: WORLD,
   mapZones: MAP.zones,
@@ -231,8 +231,14 @@ function e2eSnapshot() {
   };
 }
 
-function publishE2eSnapshot() {
+let lastPublishAt = -Infinity;
+function publishE2eSnapshot(force = false) {
   if (!E2E_ENABLED || !e2eStatus) return;
+  // Interface ticks call this every frame; serialize at most every 100 ms
+  // unless a caller forces it (results, errors, readiness flips).
+  const now = performance.now();
+  if (!force && now - lastPublishAt < 100) return;
+  lastPublishAt = now;
   const snapshot = e2eSnapshot();
   const serialized = JSON.stringify(snapshot);
   app.dataset.gameReady = String(state.loaded);
@@ -264,7 +270,7 @@ function sampleKeyboardSmokeMovement() {
 
 function setE2eResult(result) {
   e2eState.lastResult = result;
-  publishE2eSnapshot();
+  publishE2eSnapshot(true);
 }
 
 if (E2E_ENABLED) {
@@ -275,11 +281,11 @@ if (E2E_ENABLED) {
   app.append(e2eStatus);
   window.addEventListener('error', (event) => {
     e2eState.errors.push(event.error?.message ?? event.message ?? 'runtime error');
-    publishE2eSnapshot();
+    publishE2eSnapshot(true);
   });
   window.addEventListener('unhandledrejection', (event) => {
     e2eState.errors.push(String(event.reason?.message ?? event.reason ?? 'unhandled rejection'));
-    publishE2eSnapshot();
+    publishE2eSnapshot(true);
   });
 }
 
@@ -1948,7 +1954,6 @@ function nearestTownNpc(maxDistance = Infinity) {
 function enterDungeon() {
   if (state.mode === 'dungeon' || !player) return;
   state.mode = 'dungeon';
-  navigation.mode = state.mode;
   state.teleporting = false;
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
   window.clearTimeout(dialogueTimeout);
@@ -2051,7 +2056,6 @@ function runObjectivesComplete() {
 }
 
 function isWalkable(x, z, padding = 0.55) {
-  navigation.mode = state.mode;
   return isWalkablePoint({ x, z, padding, navigation });
 }
 
@@ -2060,7 +2064,7 @@ function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
     actor.root.position,
     offsetX,
     offsetZ,
-    state.mode === 'town' ? navigation.townBounds : navigation.worldBounds,
+    navigation.modeBounds(),
     isWalkable,
     padding,
   );
@@ -2414,6 +2418,18 @@ function nearestClosedGate(maxDistance = Infinity) {
   return nearest;
 }
 
+function findGate(corridorId) {
+  return state.gates.find((candidate) => candidate.corridorId === corridorId);
+}
+
+function clearEnemies(filter = () => true) {
+  for (const enemy of enemies) {
+    if (!filter(enemy)) continue;
+    enemy.dead = true;
+    enemy.root.visible = false;
+  }
+}
+
 function openGate(gate) {
   if (!gate || gate.open || !gate.roomIds.includes(state.currentRoomId)) return;
   const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
@@ -2559,12 +2575,11 @@ function updateInterface(delta, force = false) {
   publishE2eSnapshot();
 }
 
-// Burst particles share one frozen geometry and draw from a ring buffer of
-// pooled meshes. Each particle keeps its own material so randomized lifetimes
-// can fade independently; the pool only avoids per-burst allocations.
-const BURST_POOL_SIZE = 160;
+// Burst particles share one frozen geometry and draw from a pool of meshes.
+// Each particle keeps its own material so randomized lifetimes can fade
+// independently; released slots are reused, live ones never are.
 let burstGeometry = null;
-const acquireBurstMesh = createSlotPool(BURST_POOL_SIZE, () => {
+const burstMeshPool = createSlotPool(() => {
   if (!burstGeometry) burstGeometry = new THREE.SphereGeometry(0.055, 6, 6);
   const mesh = new THREE.Mesh(burstGeometry, new THREE.MeshBasicMaterial({ transparent: true }));
   scene.add(mesh);
@@ -2573,7 +2588,7 @@ const acquireBurstMesh = createSlotPool(BURST_POOL_SIZE, () => {
 
 function spawnBurst(position, color = 0xf0c071, count = 12) {
   for (let index = 0; index < count; index += 1) {
-    const mesh = acquireBurstMesh();
+    const mesh = burstMeshPool.acquire();
     mesh.visible = true;
     mesh.material.color.set(color);
     mesh.material.opacity = 1;
@@ -3012,6 +3027,7 @@ function updateEffects(delta) {
     if (effect.life <= 0) {
       // Return the mesh to the pool; geometry and material stay alive.
       effect.mesh.visible = false;
+      burstMeshPool.release(effect.mesh);
       effects.splice(index, 1);
     }
   }
@@ -3668,7 +3684,6 @@ function interact() {
     if (nearbyNpc && !state.teleporting) {
       state.interactionCount += 1;
       state.lastInteraction = { kind: 'npc', id: nearbyNpc.name };
-      if (e2eState.smoke) e2eState.smoke.interaction = state.lastInteraction;
     }
     talkToTownNpc(nearbyNpc);
     return;
@@ -3901,7 +3916,7 @@ async function start() {
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
     setToast('Find Ranger Rowan by the archery yard.');
     window.__gameReady = true;
-    publishE2eSnapshot();
+    publishE2eSnapshot(true);
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
@@ -3938,15 +3953,9 @@ window.__cryptRun = async (instant = false) => {
     wait,
     timeoutMs,
   });
-  const clearProfileRoom = () => {
-    for (const enemy of enemies) {
-      if (enemy.roomId !== state.currentRoomId) continue;
-      enemy.dead = true;
-      enemy.root.visible = false;
-    }
-  };
+  const clearProfileRoom = () => clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
   const openProfileGate = async (corridorId) => {
-    const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+    const gate = findGate(corridorId);
     if (!gate) throw new Error(`Profile route has no gate for ${corridorId}.`);
     if (gate.open) return;
     await walkTo(gate.position.x, gate.position.z);
@@ -4013,8 +4022,9 @@ window.__cryptRun = async (instant = false) => {
   }
 };
 
-// Auto-walk hook: when a target exists, inject movement keys toward it.
-(function patchPlayerUpdate() {
+// Auto-walk hook: when a profile target exists, inject movement toward it.
+// Test-only: production keeps the unpatched updatePlayer.
+if (E2E_ENABLED) {
   const originalUpdate = updatePlayer;
   updatePlayer = function patchedUpdatePlayer(delta) {
     const target = window.__cryptWalkTarget;
@@ -4028,13 +4038,13 @@ window.__cryptRun = async (instant = false) => {
         player.play(['running', 'walking']);
         state.started = true;
         state.combatStarted = true;
+        sampleKeyboardSmokeMovement();
         return;
       }
     }
     originalUpdate(delta);
   };
-})();
-
+}
 // --- Fast functional-checkpoint surface (opt in through ?e2e) ---
 // Not a performance instrument: it bypasses animation time. Use __cryptRun
 // for any timing/frame measurement.
@@ -4044,16 +4054,11 @@ if (E2E_ENABLED) {
     player.root.position.x = x;
     player.root.position.z = z;
     updateProgression();
-    publishE2eSnapshot();
+    publishE2eSnapshot(true);
   };
-  const clearAllEnemies = () => {
-    for (const enemy of enemies) {
-      enemy.dead = true;
-      enemy.root.visible = false;
-    }
-  };
+  const clearAllEnemies = () => clearEnemies();
   const openFastGate = (corridorId) => {
-    const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+    const gate = findGate(corridorId);
     if (!gate) throw new Error(`No gate for ${corridorId}.`);
     openGate(gate);
     if (!gate.open) throw new Error(`Fast route could not open ${corridorId}.`);
@@ -4151,12 +4156,12 @@ if (E2E_ENABLED) {
       startedAt: performance.now(),
       cameraForward: { x: cameraForward.x, z: cameraForward.z },
       interactionBefore: state.interactionCount,
+      lastInteractionBefore: state.lastInteraction,
       errorsBefore: e2eState.errors.length,
       sampleMode: state.mode,
       sample: { x: player.root.position.x, z: player.root.position.z },
       pathDistance: 0,
       forwardTravel: 0,
-      interaction: null,
     };
     setE2eResult(null);
   };
@@ -4170,7 +4175,9 @@ if (E2E_ENABLED) {
     const forwardDot = distance > 0.001 ? smoke.forwardTravel / distance : 0;
     const assertions = {
       cameraRelativeW: distance > 0.1 && forwardDot > 0.55,
-      interacted: state.interactionCount > smoke.interactionBefore && smoke.interaction?.kind === 'npc',
+      interacted: state.interactionCount > smoke.interactionBefore
+        && state.lastInteraction !== smoke.lastInteractionBefore
+        && state.lastInteraction?.kind === 'npc',
       windowRuntimeErrors: e2eState.errors.length === smoke.errorsBefore,
     };
     setE2eResult({
@@ -4199,7 +4206,7 @@ if (E2E_ENABLED) {
       } catch (error) {
         setE2eResult({ kind: command, pass: false, error: error instanceof Error ? error.message : String(error), snapshot: e2eSnapshot() });
       }
-      publishE2eSnapshot();
+      publishE2eSnapshot(true);
     });
     controls.append(button);
   };
@@ -4214,14 +4221,10 @@ if (E2E_ENABLED) {
     placeAt,
     clearRoom() {
       if (!player) throw new Error('World not built yet.');
-      for (const enemy of enemies) {
-        if (enemy.roomId !== state.currentRoomId) continue;
-        enemy.dead = true;
-        enemy.root.visible = false;
-      }
+      clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
     },
     openGateById(corridorId) {
-      const gate = state.gates.find((candidate) => candidate.corridorId === corridorId);
+      const gate = findGate(corridorId);
       if (!gate) throw new Error(`No gate for ${corridorId}.`);
       openGate(gate);
       return gate.open;

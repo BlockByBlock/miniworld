@@ -12,10 +12,9 @@ export function collectDungeonLightRecipes(visibleZoneIds, dungeonZoneLights, ca
   for (const zoneId of visibleZoneIds) {
     recipes.push(...(dungeonZoneLights.get(zoneId) ?? []));
   }
-  if (recipes.length > capacity) {
-    throw new Error(`Dungeon light pool capacity ${capacity} exceeded by ${recipes.length} recipes.`);
-  }
-  return recipes;
+  // Overflowing the shader light count must degrade gracefully, not crash
+  // the render loop when content grows past the pool.
+  return recipes.slice(0, capacity);
 }
 
 export async function waitForProfileTarget({
@@ -38,14 +37,10 @@ export async function waitForProfileTarget({
   throw new Error(`Profile route could not reach (${x}, ${z}).`);
 }
 
-export function createSlotPool(size, createSlot) {
-  if (!Number.isInteger(size) || size < 1) throw new RangeError('Pool size must be a positive integer.');
-  const slots = [];
-  let cursor = 0;
-  return () => {
-    if (!slots[cursor]) slots[cursor] = createSlot();
-    const slot = slots[cursor];
-    cursor = (cursor + 1) % size;
-    return slot;
+export function createSlotPool(createSlot) {
+  const free = [];
+  return {
+    acquire: () => free.pop() ?? createSlot(),
+    release: (slot) => { free.push(slot); },
   };
 }

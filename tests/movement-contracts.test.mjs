@@ -8,6 +8,7 @@ import {
   stepActorWithinMap,
 } from '../src/movement-contracts.js';
 
+let currentMode = 'dungeon';
 const townBounds = { minX: -20, maxX: 20, minZ: -20, maxZ: 20 };
 const room = { id: 'hub', minX: -10, maxX: 10, minZ: 0, maxZ: 20 };
 const corridor = { id: 'entry-corridor', minX: -2, maxX: 2, minZ: 20, maxZ: 30 };
@@ -15,7 +16,7 @@ const destination = { id: 'vault', minX: -10, maxX: 10, minZ: 30, maxZ: 40 };
 const corridorZones = new Set([corridor]);
 const collider = { root: { visible: true }, minX: 4, maxX: 6, minZ: 4, maxZ: 6 };
 const navigation = createNavigationContext({
-  mode: 'dungeon',
+  getMode: () => currentMode,
   townBounds,
   worldBounds: { minX: -60, maxX: 60, minZ: -55, maxZ: 40 },
   mapZones: [room, corridor, destination],
@@ -25,7 +26,8 @@ const navigation = createNavigationContext({
 });
 
 function walkable({ x, z, padding, mode = 'dungeon' }) {
-  return isWalkablePoint({ x, z, padding, navigation: { ...navigation, mode } });
+  currentMode = mode;
+  return isWalkablePoint({ x, z, padding, navigation });
 }
 
 test('rejects points outside the map and accepts the room interior', () => {
@@ -39,6 +41,8 @@ test('colliders block with padding and only while visible', () => {
   assert.equal(walkable({ x: 5, z: 5 }), false);
   assert.equal(walkable({ x: 5 + 0.55, z: 5 }), false);
   assert.equal(walkable({ x: 6.56, z: 5 }), true);
+  // Same x-strip, outside the collider's z-range: must stay walkable.
+  assert.equal(walkable({ x: 5, z: 8 }), true);
   collider.root.visible = false;
   assert.equal(walkable({ x: 5, z: 5 }), true);
   collider.root.visible = true;
@@ -47,7 +51,7 @@ test('colliders block with padding and only while visible', () => {
 test('town mode uses town bounds and town colliders', () => {
   const houseCollider = { root: { visible: true }, minX: -6, maxX: -4, minZ: -6, maxZ: -4 };
   const townNavigation = createNavigationContext({
-    mode: 'town',
+    getMode: () => 'town',
     townBounds,
     worldBounds: townBounds,
     mapZones: [room, destination],
@@ -59,6 +63,14 @@ test('town mode uses town bounds and town colliders', () => {
   assert.equal(isWalkablePoint({ navigation: townNavigation, x: -21, z: 0 }), false);
 });
 
+test('modeBounds follows the live mode without a stale copy', () => {
+  currentMode = 'dungeon';
+  assert.equal(navigation.modeBounds(), navigation.worldBounds);
+  currentMode = 'town';
+  assert.equal(navigation.modeBounds(), navigation.townBounds);
+  currentMode = 'dungeon';
+});
+
 test('corridor clearance keeps doorways usable instead of seam-blocking them', () => {
   // Padding shrinks rooms but grows corridors so their usable areas meet
   // at the doorway (z ~ 19.45..20) instead of leaving a collision seam.
@@ -66,6 +78,7 @@ test('corridor clearance keeps doorways usable instead of seam-blocking them', (
   assert.equal(walkable({ x: 0, z: 29.7, padding: 0.55 }), true);
   assert.equal(walkable({ x: 2.6, z: 25, padding: 0.55 }), false);
 });
+
 test('steps clamp to bounds and slide along walls axis-by-axis', () => {
   const point = { x: 9, z: 10 };
   stepActorWithinMap(point, 5, 0, room, (x, z) => walkable({ x, z }));
