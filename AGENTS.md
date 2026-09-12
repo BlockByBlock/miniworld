@@ -1,32 +1,50 @@
-# AGENTS.md
+# Forgotten Crypt
 
-Guidance for coding agents working in this repository.
+Three.js/Vite game with a rendered browser client and a deterministic headless
+simulation. `README.md` describes the game and local setup.
 
-## Commands
+## Gameplay and content contracts
 
-All scripts live in [package.json](./package.json): `npm run dev` (Vite dev server), `npm run build`, `npm test`, `npm run test:headless`.
+- `src/game/world-rules.js` owns shared gameplay decisions: gate/chest gating,
+  rewards, damage, and victory. Both the rendered game and headless simulation
+  consume these rules; change the owning rule rather than duplicating it.
+- `src/main.js` owns rendering, animation, audio, input, and UI.
+  `src/game/game-core.js` operates on plain state without THREE, DOM, or timers.
+  Headless actions are semantic (`talkTo`, `moveTo`, `interact`, `openGate`,
+  `useAction`, `equip`, `consume`); advance time with `tick(delta)` and inspect
+  results through `describe()` and `getEvents()`.
+- `src/data/world.json` owns rooms, corridors, enemies, spawns, chests, wards,
+  items, actions, and objective order. `src/world-data.js` loads and validates
+  it. New sections or fields require corresponding validator and test changes.
+- Room decorations are level data in `src/game/room-decorations.js`, interpreted
+  by `decorateRoom()` in the rendered client.
+- Gate traversal closes a gate only after the actor fully enters the destination
+  room, using the entry clearance inset. Center-crossing is insufficient;
+  movement and progression depend on this ordering.
 
-## Architecture
+## References by task
 
-One definition of each gameplay rule lives in [src/game/world-rules.js](./src/game/world-rules.js) and is imported by both consumers:
+- Game behavior and local setup: the relevant `README.md` section.
+- Full New Game-to-victory route: `DELVE_STEPS` in `src/game/delve-route.js`.
+  Both `tests/game-core.test.mjs` and `tools/crypt-headless.mjs` interpret it;
+  update the shared route when progression changes.
+- Adding or replacing bundled assets: `ASSET_CREDITS.md` and
+  `THIRD_PARTY_NOTICES.md`. Keep provenance and license records aligned with
+  the assets included in the game.
 
-- **Rendered game** — [src/main.js](./src/main.js) owns rendering, animation, audio, input, and UI. It delegates gameplay decisions (gate/chest gating, rewards, damage math, win condition) to world-rules; keep it that way rather than re-deriving decisions inline.
-- **Headless simulation** — [src/game/game-core.js](./src/game/game-core.js) runs the same rules on plain JS state with no THREE/DOM/timers. Tests drive it through semantic actions (`talkTo`, `moveTo`, `interact`, `openGate`, `useAction`, `equip`, `consume`) instead of keyboard/mouse input, advance time explicitly with `tick(delta)`, and read state via `describe()` / `getEvents()`.
+## Validation and completion
 
-When changing a gameplay rule, change it in world-rules and let both surfaces follow — never copy the decision into a second file.
+Commands are defined in `package.json`:
 
-## World content
+- Implementation changes: run `npm test` and `npm run build`.
+- Gameplay or progression changes: also run `npm run test:headless`.
+- Rendering, animation, camera, input, or UI changes: inspect the affected flow
+  in-browser with `npm run dev`; headless tests do not cover presentation.
+- Documentation-only changes: run `git diff --check`.
 
-Stable world data (rooms, corridors, enemies, chests, items, action stats) lives in [src/data/world.json](./src/data/world.json), loaded and schema-validated by [src/world-data.js](./src/world-data.js). New top-level sections or fields require validator and test updates alongside the data. Room decoration layouts are level data too: [src/game/room-decorations.js](./src/game/room-decorations.js), interpreted by `decorateRoom()` in main.js.
+`clearRoom()` accelerates tests by standing in for combat. It does not establish
+combat parity; use `useAction` to exercise production-equivalent combat.
 
-## Testing
-
-- Unit/contract tests target the browser-free modules under `tests/` (`npm test`).
-- The full New Game-to-victory delve route lives once as `DELVE_STEPS` in [src/game/delve-route.js](./src/game/delve-route.js); both `tests/game-core.test.mjs` and [tools/crypt-headless.mjs](./tools/crypt-headless.mjs) interpret it. Route changes are made there, not copied between consumers.
-- `clearRoom()` on the core is an accelerated test affordance standing in for room combat; production-equivalent combat exists only through `useAction`.
-- Rendering, animation, camera, and UI have no automated coverage — when touching presentation code in main.js, verify in-browser with `npm run dev`.
-
-## Gotchas
-
-- Gate traversal closes a gate only after the actor has *fully* entered the destination room (entry clearance inset, not center-crossing); both movement and progression depend on this ordering.
-- Enemy profiles, spawn tables, chest wards, and objective order all come from world.json — check there before hardcoding a value.
+Complete authorized work through applicable validation and fixes for failures
+caused by the change. Report remaining failures and coverage limits. Preserve
+unrelated work; commit, push, deploy, or publish only when authorized.
