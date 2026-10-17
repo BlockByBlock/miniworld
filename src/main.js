@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { VisibilityGroup } from './visibility-group.js';
 import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
 import {
   collectDungeonLightRecipes,
@@ -25,6 +26,7 @@ import {
   HEAL_FRACTION,
   INTERACT_RADII,
   applyChestRewards,
+  applyGateOpen,
   attackDamage,
   computeZoneNeighbors,
   evaluateChestBlock,
@@ -376,6 +378,31 @@ let player;
 let toastTimeout;
 let pointerPress = null;
 let selectedTarget = null;
+let moonLight = null;
+let blobShadowMesh = null;
+let townBlobShadowMesh = null;
+let townWorldGroup = null;
+let wardVisual = null;
+let targetMarker = null;
+let dialogueTimeout;
+
+const blobShadowPosition = new THREE.Vector3();
+const blobShadowScale = new THREE.Vector3();
+const blobShadowRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+const blobShadowMatrix = new THREE.Matrix4();
+
+function setLoading(progress, label) {
+  loadingFill.style.width = `${Math.round(progress * 100)}%`;
+  loadingLabel.textContent = label;
+}
+
+function setToast(message, duration = 2200) {
+  toast.textContent = message;
+  toast.classList.add('is-visible');
+  window.clearTimeout(toastTimeout);
+  toastTimeout = window.setTimeout(() => toast.classList.remove('is-visible'), duration);
+}
+
 function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraShake = Math.max(state.cameraShake, shake);
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
@@ -526,7 +553,7 @@ class Actor {
     this.name = name;
     this.role = role;
     this.type = type;
-    this.root = new THREE.Group();
+    this.root = new VisibilityGroup();
     this.root.userData.actor = this;
     this.root.position.copy(position);
     this.spawnPosition = position.clone();
@@ -670,7 +697,7 @@ function addWorldObject(object, parent = null) {
 }
 
 function buildZoneRenderGroup(zone, build) {
-  const group = new THREE.Group();
+  const group = new VisibilityGroup();
   group.name = `zone:${zone.id}`;
   zoneRenderGroups.set(zone.id, group);
   scene.add(group);
@@ -1804,6 +1831,17 @@ function updateProgression() {
   }
 }
 
+function runObjectivesComplete() {
+  return evaluateObjectivesComplete({
+    wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
+    livingEnemyCount: countLivingEnemies(),
+  });
+}
+
+function isWalkable(x, z, padding = 0.55) {
+  return isWalkablePoint({ x, z, padding, navigation });
+}
+
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
   stepActorWithinMap(
     actor.root.position,
@@ -2040,6 +2078,7 @@ function useInventorySlot(index) {
 
 function createLootVisual(itemId, position) {
   const item = ITEM_DEFS[itemId];
+  const zoneId = zoneAtPosition(position)?.id ?? state.currentRoomId;
   const root = new THREE.Group();
   const color = new THREE.Color(item.color);
   const coreGeometry = item.kind === 'equipment'
@@ -2067,8 +2106,8 @@ function createLootVisual(itemId, position) {
   root.add(beam);
   root.position.copy(position);
   root.position.y = 0.36;
-  scene.add(root);
-  const drop = { itemId, root, position: position.clone(), phase: Math.random() * Math.PI * 2, collected: false };
+  zoneRenderGroups.get(zoneId).add(root);
+  const drop = { itemId, zoneId, root, position: position.clone(), phase: Math.random() * Math.PI * 2, collected: false };
   lootDrops.push(drop);
   return drop;
 }
@@ -2085,7 +2124,7 @@ function nearestLootDrop(maxDistance = Infinity) {
   let nearest = null;
   let nearestDistance = maxDistance;
   for (const drop of lootDrops) {
-    if (drop.collected) continue;
+    if (drop.collected || !visibleZoneIds.has(drop.zoneId)) continue;
     const distance = player.root.position.distanceTo(drop.position);
     if (distance < nearestDistance) {
       nearest = drop;
@@ -2104,7 +2143,7 @@ function collectLootDrop(drop) {
   }
   drop.collected = true;
   state.inventory[slot] = drop.itemId;
-  scene.remove(drop.root);
+  drop.root.removeFromParent();
   drop.root.traverse((child) => {
     if (!child.isMesh) return;
     child.geometry.dispose();
@@ -2120,7 +2159,7 @@ function collectLootDrop(drop) {
 
 function updateLootDrops(delta) {
   for (const drop of lootDrops) {
-    if (drop.collected) continue;
+    if (drop.collected || !visibleZoneIds.has(drop.zoneId)) continue;
     drop.phase += delta * 2.2;
     drop.root.position.y = 0.38 + Math.sin(drop.phase) * 0.09;
     drop.root.rotation.y += delta * 0.85;
@@ -2174,22 +2213,15 @@ function openGate(gate) {
     livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
   });
   if (!verdict.ok) {
-    if (verdict.reason) setToast(verdict.reason, 1800);
+    if (verdict.message) setToast(verdict.message, 1800);
     return;
   }
-  for (const otherGate of state.gates) {
-    if (!otherGate.open) continue;
-    moveGateAssemblyToRoom(otherGate, otherGate.fromRoomId);
-    setGateWallFrameVisible(otherGate, otherGate.fromRoomId, true);
-    setGateWallFrameVisible(otherGate, otherGate.toRoomId, false);
-    otherGate.open = false;
+  for (const { gate: otherGate, fromRoomId, toRoomId } of applyGateOpen(state.gates, gate, state.currentRoomId)) {
+    moveGateAssemblyToRoom(otherGate, fromRoomId);
+    setGateWallFrameVisible(otherGate, fromRoomId, true);
+    setGateWallFrameVisible(otherGate, toRoomId, false);
     otherGate.root.visible = true;
-    otherGate.fromRoomId = null;
-    otherGate.toRoomId = null;
   }
-  gate.open = true;
-  gate.fromRoomId = state.currentRoomId;
-  gate.toRoomId = gate.roomIds.find((id) => id !== state.currentRoomId) ?? null;
   setGateWallFrameVisible(gate, gate.fromRoomId, true);
   setGateWallFrameVisible(gate, gate.toRoomId, true);
   moveGateAssemblyToRoom(gate, gate.toRoomId);
@@ -2203,13 +2235,7 @@ function openGate(gate) {
 }
 
 function chestBlockReason(chest) {
-  if (!chest || chest.opened) return '';
-  const guardianCount = chest.kind === 'seal'
-    ? livingEnemiesInBranch(chest.branch).length
-    : chest.kind === 'archive'
-      ? livingEnemiesInBranch('north', { includeWarden: false }).length
-      : livingEnemiesInRoom(chest.roomId).length;
-  return evaluateChestBlock({ chest, guardianCount });
+  return evaluateChestBlock({ chest, enemies, roomBranch: ROOM_BRANCH });
 }
 
 // Objective ladder, first match wins. Each row is the full rule for one
@@ -3690,20 +3716,20 @@ window.__cryptRun = async (instant = false) => {
   window.__cryptDone = false;
   window.__cryptError = null;
   const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
-  const walkTo = (x, z, timeoutMs = 20000) => waitForProfileTarget({
+  const walkTo = (x, z, threshold = 0.3) => waitForProfileTarget({
     x,
     z,
     setTarget: (target) => { window.__cryptWalkTarget = target; },
     getPosition: () => player.root.position,
     wait,
-    timeoutMs,
+    threshold,
   });
   const clearProfileRoom = () => clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
   const openProfileGate = async (corridorId) => {
     const gate = findGate(corridorId);
     if (!gate) throw new Error(`Profile route has no gate for ${corridorId}.`);
     if (gate.open) return;
-    await walkTo(gate.position.x, gate.position.z);
+    await walkTo(gate.position.x, gate.position.z, 1.2);
     clearProfileRoom();
     openGate(gate);
     if (!gate.open) throw new Error(`Profile route could not open ${corridorId}.`);
@@ -3726,34 +3752,46 @@ window.__cryptRun = async (instant = false) => {
     window.__cryptMark('dungeon:entered');
     // Entrance -> hub.
     await openProfileGate('entry-corridor');
-    await walkTo(0, 12.5);
+    await walkTo(3, 16);
+    await walkTo(3, 12.5);
+    await walkTo(-5, 12.5);
     window.__cryptMark('room:hub');
     await wait(1200); // let hub lights/shaders settle
     // West branch: gate corridor -> gate room -> burial -> ossuary.
     await openProfileGate('west-corridor');
-    await walkTo(-26, 9);
+    await walkTo(-26, 8);
     window.__cryptMark('room:westGate');
     await wait(800);
     await openProfileGate('west-deep-corridor');
-    await walkTo(-47, 9);
+    await walkTo(-47, 8);
     window.__cryptMark('room:westBurial');
+    await walkTo(-49.3, 8);
+    await walkTo(-49.3, 3.5);
+    await walkTo(-47, 3.5);
     await openProfileGate('west-drop');
-    await walkTo(-47, -6);
+    await walkTo(-47, -2.5);
     window.__cryptMark('room:westOssuary');
     await wait(800);
     // Return to hub, cross east.
-    await walkTo(-47, 9);
+    await openProfileGate('west-drop');
+    await walkTo(-47, 3.5);
+    await walkTo(-49.3, 3.5);
+    await walkTo(-49.3, 8);
     await openProfileGate('west-deep-corridor');
-    await walkTo(-26, 9);
+    await walkTo(-26, 8);
     await openProfileGate('west-corridor');
-    await walkTo(0, 12.5);
+    await walkTo(-5, 7.5);
+    await walkTo(5, 7.5);
     await openProfileGate('east-corridor');
-    await walkTo(26, 9);
+    await walkTo(26, 8);
     window.__cryptMark('room:eastGate');
     await wait(800);
     await openProfileGate('east-deep-corridor');
-    await walkTo(47, 9);
+    await walkTo(47, 8);
     window.__cryptMark('room:eastFlooded');
+    await walkTo(49.3, 8);
+    await walkTo(49.3, 3.2);
+    await walkTo(47, 3.2);
     await openProfileGate('east-drop');
     await walkTo(47, -6);
     window.__cryptMark('room:eastReliquary');
@@ -3822,7 +3860,16 @@ if (E2E_ENABLED) {
       enterDungeon();
       state.started = true;
       clearAllEnemies();
-      createLootVisual('healingDraft', player.root.position);
+      const lootDrop = createLootVisual('healingDraft', player.root.position);
+      const lootGroup = zoneRenderGroups.get(lootDrop.zoneId);
+      const lootPhase = lootDrop.phase;
+      updateZoneVisibility('hub', true);
+      updateLootDrops(0.1);
+      const lootHidden = lootDrop.root.parent === lootGroup
+        && !lootGroup.visible && lootDrop.phase === lootPhase && nearestLootDrop(2) === null;
+      updateZoneVisibility('entrance', true);
+      updateLootDrops(0.1);
+      const lootRevealed = lootGroup.visible && lootDrop.phase !== lootPhase && nearestLootDrop(2) === lootDrop;
       interact();
 
       placeAt(0, 26.8);
@@ -3868,7 +3915,9 @@ if (E2E_ENABLED) {
         seals: snapshot.seals.west && snapshot.seals.east,
         archiveKey: snapshot.archiveKey,
         requiredChests: requiredChestIds.every((id) => snapshot.chests.find((chest) => chest.id === id)?.opened),
-        lootCollected: snapshot.loot.some((drop) => drop.collected),
+        lootHidden,
+        lootRevealed,
+        lootCollected: lootDrop.collected && lootDrop.root.parent === null,
         interacted: snapshot.interactionCount >= requiredChestIds.length + 4,
         gateTraversal: e2eState.fastGateTransitions === state.gates.length,
         objectives: snapshot.objectives.complete,

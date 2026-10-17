@@ -53,7 +53,7 @@ export const ROOM_DECORATIONS = {
     { op: 'tomb', spots: [[-53, 6], [-47, 6], [-41, 6], [-53, 13], [-41, 13]], rotations: [0, 0, 0, Math.PI, Math.PI], scale: 0.9 },
     { op: 'torch', wall: 'south', along: -53 },
     { op: 'torch', wall: 'south', along: -41 },
-    { op: 'decoration', asset: 'coffin', x: -47, z: 3.3, width: 2.2, height: 1, colliderWidth: 2.05, colliderDepth: 0.9 },
+    { op: 'decoration', asset: 'coffin', x: -51.5, z: 3.3, width: 2.2, height: 1, colliderWidth: 2.05, colliderDepth: 0.9 },
     { op: 'decoration', asset: 'skullCandle', x: -54.2, z: 14.1, height: 0.62, rotationY: -0.4 },
     { op: 'decoration', asset: 'boneB', x: -39.8, z: 14.1, width: 1.1, rotationY: 1.1 },
     { op: 'decoration', asset: 'rubbleHalf', x: -54.2, z: 3.4, width: 1.55, rotationY: 0.7 },

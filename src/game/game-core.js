@@ -21,6 +21,7 @@ import {
   EXIT_POSITION,
   HEAL_FRACTION,
   applyChestRewards,
+  applyGateOpen,
   attackDamage,
   computeZoneNeighbors,
   evaluateChestBlock,
@@ -142,13 +143,6 @@ export function createGameCore({
 
   function livingEnemiesInRoom(roomId) {
     return state.enemies.filter((enemy) => !enemy.dead && enemy.roomId === roomId);
-  }
-  function livingEnemiesInBranch(branch, { includeWarden = true } = {}) {
-    return state.enemies.filter((enemy) => (
-      !enemy.dead
-      && roomBranch[enemy.roomId] === branch
-      && (includeWarden || enemy.profileKey !== 'warden')
-    ));
   }
   const livingEnemyCount = () => state.enemies.filter((enemy) => !enemy.dead).length;
 
@@ -336,9 +330,10 @@ export function createGameCore({
       record('gate-blocked', { corridorId: gate?.corridorId ?? null, code: verdict.code, message: verdict.message });
       return { ok: false, code: verdict.code, reason: verdict.message };
     }
-    gate.open = true;
-    gate.fromRoomId = state.currentRoomId;
-    gate.toRoomId = gate.roomIds.find((id) => id !== state.currentRoomId) ?? null;
+    for (const { gate: closedGate } of applyGateOpen(state.gates, gate, state.currentRoomId)) {
+      record('gate-closed', { corridorId: closedGate.corridorId, reason: 'another-gate-opened' });
+    }
+    recomputeVisibleZones();
     record('gate-opened', { corridorId: gate.corridorId });
     return { ok: true, corridorId: gate.corridorId };
   }
@@ -365,8 +360,8 @@ export function createGameCore({
   function openChestOutcome(chest) {
     const blockedReason = evaluateChestBlock({
       chest,
-      branchGuardians: (branch) => livingEnemiesInBranch(branch).length,
-      roomGuardians: (roomId) => livingEnemiesInRoom(roomId).length,
+      enemies: state.enemies,
+      roomBranch,
     });
     if (blockedReason) {
       record('chest-blocked', { chestId: chest.id, reason: blockedReason });

@@ -30,23 +30,41 @@ export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
   return { ok: true, code: 'opened', message: '' };
 }
 
+export function applyGateOpen(gates, gate, currentRoomId) {
+  // Preserve old endpoints for the rendered doorway frames before closing.
+  const closed = gates.filter((other) => other.open).map((other) => ({
+    gate: other, fromRoomId: other.fromRoomId, toRoomId: other.toRoomId,
+  }));
+  for (const { gate: other } of closed) {
+    other.open = false;
+    other.fromRoomId = null;
+    other.toRoomId = null;
+  }
+  gate.open = true;
+  gate.fromRoomId = currentRoomId;
+  gate.toRoomId = gate.roomIds.find((id) => id !== currentRoomId) ?? null;
+  return closed;
+}
+
 // --- Chests --------------------------------------------------------------
 
-// The single place that maps a chest kind onto its warding population and
-// its blocked message. Callers hand in two population resolvers; every kind
-// dispatch lives here so main.js and game-core cannot drift.
-export function evaluateChestBlock({ chest, branchGuardians, roomGuardians }) {
+// Resolve the warding population here so callers cannot drop scope rules.
+export function evaluateChestBlock({ chest, enemies, roomBranch }) {
   if (!chest || chest.opened) return '';
+  const guardians = enemies.filter((enemy) => !enemy.dead);
   if (chest.kind === 'seal') {
-    const count = branchGuardians(chest.branch);
+    const count = guardians.filter((enemy) => roomBranch[enemy.roomId] === chest.branch).length;
     if (count > 0) {
       return `The ${chest.branch}ern seal remains warded by ${count} guardian${count === 1 ? '' : 's'}.`;
     }
   }
-  if (chest.kind === 'archive' && branchGuardians('north', { includeWarden: false }) > 0) {
+  if (chest.kind === 'archive' && guardians.some((enemy) => (
+    roomBranch[enemy.roomId] === 'north' && enemy.profileKey !== 'warden'
+  ))) {
     return 'The Archive cache remains sealed while its acolytes stand.';
   }
-  if ((chest.kind === 'final' || chest.kind === 'cache') && roomGuardians(chest.roomId) > 0) {
+  if ((chest.kind === 'final' || chest.kind === 'cache')
+    && guardians.some((enemy) => enemy.roomId === chest.roomId)) {
     return chest.kind === 'final'
       ? 'The Warden\'s reliquary is still bound to the living dead.'
       : 'Clear this chamber before opening its cache.';

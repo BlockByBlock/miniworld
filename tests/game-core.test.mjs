@@ -43,26 +43,20 @@ test('talking to the hunter enters the dungeon after the trail delay', () => {
 test('evaluateChestBlock wards every kind on its resolved guardian count', async () => {
   const { evaluateChestBlock } = await import('../src/game/world-rules.js');
   const chest = (kind, branch = null) => ({ kind, branch, roomId: 'hub', opened: false });
-  const resolvers = {
-    branchGuardians: () => 2,
-    roomGuardians: () => 3,
-  };
-  // Each kind must block while its warding population stands, using the
-  // resolver that matches the kind — never a silently-zero default.
+  // Each kind must block while its warding population stands.
   for (const kind of ['seal', 'archive', 'final', 'cache']) {
+    const input = {
+      chest: chest(kind, 'west'),
+      enemies: [{ roomId: 'hub', profileKey: 'guard', dead: false }],
+      roomBranch: { hub: kind === 'archive' ? 'north' : 'west' },
+    };
     assert.match(
-      evaluateChestBlock({ chest: chest(kind, 'west'), ...resolvers }),
+      evaluateChestBlock(input),
       /warded|sealed|bound|Clear this chamber/,
       `${kind} must stay blocked with guardians alive`,
     );
-    assert.equal(
-      evaluateChestBlock({
-        chest: chest(kind, 'west'),
-        branchGuardians: () => 0,
-        roomGuardians: () => 0,
-      }),
-      '',
-    );
+    input.enemies[0].dead = true;
+    assert.equal(evaluateChestBlock(input), '');
   }
 });
 
@@ -92,6 +86,51 @@ test('closed gates block headless traversal until opened', () => {
   assert.equal(core.openGate('entry-corridor').ok, true);
   assert.equal(core.moveTo(0, 12.5).ok, true);
   assert.equal(core.describe().room, 'hub');
+});
+
+test('switching gates reveals only the chosen room and closes after full entry', () => {
+  const core = freshCore();
+  enterDungeon(core);
+  assert.equal(core.openGate('entry-corridor').ok, true);
+  assert.equal(core.moveTo(0, 12.5).ok, true);
+  assert.equal(core.openGate('west-corridor').ok, true);
+  assert.equal(core.openGate('east-corridor').ok, true);
+
+  const view = core.describe();
+  assert.equal(view.gates.find((gate) => gate.corridorId === 'west-corridor').open, false);
+  assert.ok(view.visibleZoneIds.includes('eastGate'));
+  assert.ok(!view.visibleZoneIds.includes('westGate'));
+
+  assert.equal(core.moveTo(18.6, 9).ok, true);
+  assert.equal(core.describe().room, 'hub');
+  assert.equal(core.describe().gates.find((gate) => gate.corridorId === 'east-corridor').open, true);
+  assert.equal(core.moveTo(20, 9).ok, true);
+  assert.equal(core.describe().room, 'eastGate');
+  assert.equal(core.describe().gates.find((gate) => gate.corridorId === 'east-corridor').open, false);
+});
+
+test('Archive wards include northern guardians but exclude the Warden', () => {
+  const core = freshCore();
+  const checkpoint = core.saveCheckpoint();
+  Object.assign(checkpoint.state, {
+    mode: 'dungeon',
+    playerX: 0,
+    playerZ: -27,
+    currentRoomId: 'northLibrary',
+    currentZoneId: 'northLibrary',
+    visibleZoneIds: ['northLibrary'],
+  });
+  for (const enemy of checkpoint.state.enemies) {
+    enemy.dead = !['crypt-warden', 'warden-vanguard'].includes(enemy.id);
+  }
+  core.loadCheckpoint(checkpoint);
+  assert.match(core.interact().reason, /acolytes stand/);
+
+  checkpoint.state.enemies.find((enemy) => enemy.id === 'warden-vanguard').dead = true;
+  core.loadCheckpoint(checkpoint);
+  assert.equal(core.interact().ok, true);
+  assert.equal(core.describe().archiveKey, true);
+  assert.equal(core.describe().enemies.find((enemy) => enemy.id === 'crypt-warden').dead, false);
 });
 
 test('seal chests stay warded until their whole branch is cleared', () => {
