@@ -25,6 +25,7 @@ import {
   HEAL_FRACTION,
   INTERACT_RADII,
   applyChestRewards,
+  applyGateOpen,
   attackDamage,
   computeZoneNeighbors,
   evaluateChestBlock,
@@ -376,6 +377,31 @@ let player;
 let toastTimeout;
 let pointerPress = null;
 let selectedTarget = null;
+let moonLight = null;
+let blobShadowMesh = null;
+let townBlobShadowMesh = null;
+let townWorldGroup = null;
+let wardVisual = null;
+let targetMarker = null;
+let dialogueTimeout;
+
+const blobShadowPosition = new THREE.Vector3();
+const blobShadowScale = new THREE.Vector3();
+const blobShadowRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+const blobShadowMatrix = new THREE.Matrix4();
+
+function setLoading(progress, label) {
+  loadingFill.style.width = `${Math.round(progress * 100)}%`;
+  loadingLabel.textContent = label;
+}
+
+function setToast(message, duration = 2200) {
+  toast.textContent = message;
+  toast.classList.add('is-visible');
+  window.clearTimeout(toastTimeout);
+  toastTimeout = window.setTimeout(() => toast.classList.remove('is-visible'), duration);
+}
+
 function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraShake = Math.max(state.cameraShake, shake);
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
@@ -1804,6 +1830,17 @@ function updateProgression() {
   }
 }
 
+function runObjectivesComplete() {
+  return evaluateObjectivesComplete({
+    wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
+    livingEnemyCount: countLivingEnemies(),
+  });
+}
+
+function isWalkable(x, z, padding = 0.55) {
+  return isWalkablePoint({ x, z, padding, navigation });
+}
+
 function moveActorWithinMap(actor, offsetX, offsetZ, padding = 0.55) {
   stepActorWithinMap(
     actor.root.position,
@@ -2174,22 +2211,15 @@ function openGate(gate) {
     livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
   });
   if (!verdict.ok) {
-    if (verdict.reason) setToast(verdict.reason, 1800);
+    if (verdict.message) setToast(verdict.message, 1800);
     return;
   }
-  for (const otherGate of state.gates) {
-    if (!otherGate.open) continue;
-    moveGateAssemblyToRoom(otherGate, otherGate.fromRoomId);
-    setGateWallFrameVisible(otherGate, otherGate.fromRoomId, true);
-    setGateWallFrameVisible(otherGate, otherGate.toRoomId, false);
-    otherGate.open = false;
+  for (const { gate: otherGate, fromRoomId, toRoomId } of applyGateOpen(state.gates, gate, state.currentRoomId)) {
+    moveGateAssemblyToRoom(otherGate, fromRoomId);
+    setGateWallFrameVisible(otherGate, fromRoomId, true);
+    setGateWallFrameVisible(otherGate, toRoomId, false);
     otherGate.root.visible = true;
-    otherGate.fromRoomId = null;
-    otherGate.toRoomId = null;
   }
-  gate.open = true;
-  gate.fromRoomId = state.currentRoomId;
-  gate.toRoomId = gate.roomIds.find((id) => id !== state.currentRoomId) ?? null;
   setGateWallFrameVisible(gate, gate.fromRoomId, true);
   setGateWallFrameVisible(gate, gate.toRoomId, true);
   moveGateAssemblyToRoom(gate, gate.toRoomId);
@@ -2203,13 +2233,7 @@ function openGate(gate) {
 }
 
 function chestBlockReason(chest) {
-  if (!chest || chest.opened) return '';
-  const guardianCount = chest.kind === 'seal'
-    ? livingEnemiesInBranch(chest.branch).length
-    : chest.kind === 'archive'
-      ? livingEnemiesInBranch('north', { includeWarden: false }).length
-      : livingEnemiesInRoom(chest.roomId).length;
-  return evaluateChestBlock({ chest, guardianCount });
+  return evaluateChestBlock({ chest, enemies, roomBranch: ROOM_BRANCH });
 }
 
 // Objective ladder, first match wins. Each row is the full rule for one

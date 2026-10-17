@@ -72,6 +72,9 @@ The game rules are split from the 3D presentation:
 - `src/main.js` — rendering, animation, audio, input, and UI; it delegates gameplay decisions to the shared rules.
 
 Run a full New Game-to-victory delve headlessly (no browser) with `npm run test:headless`.
+The headless model omits furniture collisions and simplifies combat timing,
+enemy movement, and status effects. Completing its route verifies progression;
+use browser checks to verify rendered movement and combat.
 
 See [ASSET_CREDITS.md](./ASSET_CREDITS.md) for the exact source commit and
 license record for the bundled models.
