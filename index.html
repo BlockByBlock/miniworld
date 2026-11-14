@@ -104,7 +104,12 @@
         <span class="eyebrow">LOADING RAVENREST</span>
         <h2>Waking the village…</h2>
         <div class="loading-track"><span id="loading-fill"></span></div>
-        <p id="loading-label">Preparing the lanterns</p>
+        <p id="loading-label" role="status">Preparing the lanterns</p>
+      </div>
+
+      <div id="render-status" class="screen-card loading-card is-hidden" role="status">
+        <h2>Graphics paused</h2>
+        <p>Waiting for the browser to restore graphics. Reload the page if it stays paused.</p>
       </div>
 
       <div id="end-screen" class="screen-card end-card is-hidden">
