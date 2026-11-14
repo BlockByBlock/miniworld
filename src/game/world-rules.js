@@ -6,6 +6,8 @@
 
 export const EXIT_POSITION = { x: 0, z: 32.4 };
 export const EXIT_RADIUS = 2.4;
+export const DUNGEON_ENTRANCE = { x: 0, z: 26.8 };
+export const ROOM_ENTRY_CLEARANCE = 1.1;
 export const HEAL_FRACTION = 0.3;
 export const CONSUMABLE_HEAL = 30;
 
@@ -14,12 +16,18 @@ export const INTERACT_RADII = { npc: 2.45, loot: 1.9, chest: 2.1, gate: 2.4 };
 
 // --- Gates ---------------------------------------------------------------
 
-// A gate opens only from one of its two rooms and only once that room holds
-// no living guardians. `code` is the machine-readable outcome for agents and
-// events; `message` is optional display prose for the rendered toast layer.
-export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
+export function hasBranchSeals(seals) {
+  return seals.west && seals.east;
+}
+
+export function evaluateGateOpen({
+  gate, currentRoomId, livingInRoomCount, crossing, seals, archiveKey,
+}) {
   if (!gate || gate.open) return { ok: false, code: 'unavailable', message: '' };
   if (!gate.roomIds.includes(currentRoomId)) return { ok: false, code: 'wrong-room', message: '' };
+  if (crossing) {
+    return { ok: false, code: 'crossing', message: 'Finish crossing before opening another gate.' };
+  }
   if (livingInRoomCount > 0) {
     return {
       ok: false,
@@ -27,7 +35,34 @@ export function evaluateGateOpen({ gate, currentRoomId, livingInRoomCount }) {
       message: `The gate is sealed by ${livingInRoomCount} remaining guardian${livingInRoomCount === 1 ? '' : 's'}.`,
     };
   }
+  if (gate.corridorId === 'north-corridor' && currentRoomId === 'hub' && !hasBranchSeals(seals)) {
+    return { ok: false, code: 'seals-required', message: 'Claim both branch seals to open the northern way.' };
+  }
+  if (gate.corridorId === 'warden-corridor' && currentRoomId === 'northLibrary' && !archiveKey) {
+    return { ok: false, code: 'archive-key-required', message: 'The Archive key opens the Warden’s Keep.' };
+  }
   return { ok: true, code: 'opened', message: '' };
+}
+
+export function gateTravelsAlongZ(first, second) {
+  return Math.abs(first.minZ + first.maxZ - second.minZ - second.maxZ)
+    > Math.abs(first.minX + first.maxX - second.minX - second.maxX);
+}
+
+// Both adapters interact with the doorway on the current room's wall.
+export function gateWallPosition(corridor, room, travelsAlongZ) {
+  const x = (corridor.minX + corridor.maxX) / 2;
+  const z = (corridor.minZ + corridor.maxZ) / 2;
+  return {
+    x: travelsAlongZ ? x : (room.minX + room.maxX) / 2 < x ? room.maxX : room.minX,
+    z: travelsAlongZ ? (room.minZ + room.maxZ) / 2 < z ? room.maxZ : room.minZ : z,
+  };
+}
+
+export function gateCrossing({ x, z, room, gates, zoneById }) {
+  const gate = gates.find((candidate) => candidate.open && candidate.fromRoomId === room.id);
+  return Boolean(gate && zoneContains(zoneById.get(gate.corridorId), x, z, -ROOM_ENTRY_CLEARANCE)
+    && !zoneContains(room, x, z, ROOM_ENTRY_CLEARANCE));
 }
 
 export function applyGateOpen(gates, gate, currentRoomId) {
@@ -58,9 +93,7 @@ export function evaluateChestBlock({ chest, enemies, roomBranch }) {
       return `The ${chest.branch}ern seal remains warded by ${count} guardian${count === 1 ? '' : 's'}.`;
     }
   }
-  if (chest.kind === 'archive' && guardians.some((enemy) => (
-    roomBranch[enemy.roomId] === 'north' && enemy.profileKey !== 'warden'
-  ))) {
+  if (chest.kind === 'archive' && guardians.some((enemy) => isArchiveGuardian(enemy, roomBranch))) {
     return 'The Archive cache remains sealed while its acolytes stand.';
   }
   if ((chest.kind === 'final' || chest.kind === 'cache')
@@ -70,6 +103,10 @@ export function evaluateChestBlock({ chest, enemies, roomBranch }) {
       : 'Clear this chamber before opening its cache.';
   }
   return '';
+}
+
+export function isArchiveGuardian(enemy, roomBranch) {
+  return roomBranch[enemy.roomId] === 'north' && enemy.roomId !== 'wardenKeep';
 }
 
 // Mutates plain progression state exactly as openChest() does; returns a
@@ -82,9 +119,7 @@ export function applyChestRewards(stateLike, chest, actionKeys) {
     summary.healed = 25;
   } else if (chest.kind === 'archive') {
     stateLike.archiveKey = true;
-  } else if (chest.kind === 'final') {
-    // The relic itself grants nothing; it enables the return to the exit.
-  } else {
+  } else if (chest.kind !== 'final') {
     summary.healed = 12;
     summary.cooldownRefresh = 1.5;
   }
@@ -146,8 +181,8 @@ export function attackDamage(action, targetProfileKey) {
 
 // --- Run objectives / win condition --------------------------------------
 
-export function runObjectivesComplete({ wardenSpoilsOpened, livingEnemyCount }) {
-  return Boolean(wardenSpoilsOpened) && livingEnemyCount === 0;
+export function runObjectivesComplete({ seals, archiveKey, wardenSpoilsOpened, livingEnemyCount }) {
+  return hasBranchSeals(seals) && archiveKey && Boolean(wardenSpoilsOpened) && livingEnemyCount === 0;
 }
 
 // --- Zone geometry ---------------------------------------------------------

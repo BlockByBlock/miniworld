@@ -18,8 +18,10 @@ import {
 } from '../movement-contracts.js';
 import {
   CONSUMABLE_HEAL,
+  DUNGEON_ENTRANCE,
   EXIT_POSITION,
   HEAL_FRACTION,
+  ROOM_ENTRY_CLEARANCE,
   applyChestRewards,
   applyGateOpen,
   attackDamage,
@@ -28,6 +30,9 @@ import {
   findRoomAt,
   findZoneAt,
   evaluateGateOpen,
+  gateCrossing,
+  gateTravelsAlongZ,
+  gateWallPosition,
   INTERACT_RADII,
   isRunVictory,
   lootItemForProfile,
@@ -35,10 +40,11 @@ import {
   resolveRoomEntry,
   runObjectivesComplete,
   visibleZoneIdsFor,
+  zoneContains,
 } from './world-rules.js';
 const MOVE_ARRIVE_DISTANCE = 0.35;
-const MOVE_TICK_SECONDS = 0.1;
-const ROOM_ENTRY_CLEARANCE = 1.1;
+const SIM_STEP_SECONDS = 0.1;
+const STEP_EPSILON = 1e-9;
 
 export function createGameCore({
   worldData = WORLD_DATA,
@@ -65,8 +71,7 @@ export function createGameCore({
     townStaticColliders: [],
   });
 
-  const actions = Object.fromEntries(Object.entries(worldData.actions)
-    .map(([id, action]) => [id, { cooldown: action.cooldown, range: action.range }]));
+  const actions = worldData.actions;
   const actionKeys = Object.keys(actions);
 
   let events = [];
@@ -95,6 +100,7 @@ export function createGameCore({
       interactionCount: 0,
       lastInteraction: null,
       elapsed: 0,
+      pendingTime: 0,
       trailTimer: 0,
       playerX: worldData.player.x,
       playerZ: worldData.player.z,
@@ -137,15 +143,13 @@ export function createGameCore({
     };
   }
 
-  const state = makeState();
+  let state = makeState();
 
   // --- queries ---------------------------------------------------------------
 
   function livingEnemiesInRoom(roomId) {
     return state.enemies.filter((enemy) => !enemy.dead && enemy.roomId === roomId);
   }
-  const livingEnemyCount = () => state.enemies.filter((enemy) => !enemy.dead).length;
-
   const roomAtPosition = (x, z, inset = 0) => findRoomAt(map.rooms, x, z, inset);
   const zoneAtPosition = (x, z) => findZoneAt(zones, x, z);
 
@@ -153,21 +157,11 @@ export function createGameCore({
     return isWalkablePoint({ x, z, padding, navigation });
   }
 
-  // Mirrors the physical gates: a closed gate seals its corridor. A step may
-  // only enter a corridor whose gate is open — unless the actor is already
-  // inside that corridor (production closes the gate only after the actor
-  // has fully entered the next room, never mid-corridor).
-  function traversable(x, z) {
-    const zone = zoneAtPosition(x, z);
-    if (!zone) return true;
-    const gate = gateByCorridor(zone.id);
-    if (!gate || gate.open) return true;
-    const currentZone = zoneAtPosition(state.playerX, state.playerZ);
-    return Boolean(currentZone && currentZone.id === zone.id);
-  }
-
   function isTraversable(x, z, padding) {
-    return isWalkable(x, z, padding) && traversable(x, z);
+    if (!isWalkable(x, z, padding)) return false;
+    if (state.mode !== 'dungeon' || roomAtPosition(x, z)) return true;
+    return map.corridors.some((corridor) =>
+      gateByCorridor(corridor.id)?.open && zoneContains(corridor, x, z, -padding));
   }
 
   function recomputeVisibleZones() {
@@ -183,6 +177,13 @@ export function createGameCore({
   const chestById = (id) => state.chests.find((chest) => chest.id === id) ?? null;
   const gateByCorridor = (corridorId) => state.gates.find((gate) => gate.corridorId === corridorId) ?? null;
 
+  function gatePosition(gate) {
+    const first = zoneById.get(gate.roomIds[0]);
+    const second = zoneById.get(gate.roomIds[1]);
+    return gateWallPosition(zoneById.get(gate.corridorId), zoneById.get(state.currentRoomId),
+      gateTravelsAlongZ(first, second));
+  }
+
   // Equipment rules (mirrors main.js): an equipped item scales damage and
   // cooldowns; agents reach them through the equip() semantic action.
   function equippedDefinition() {
@@ -192,18 +193,26 @@ export function createGameCore({
   const itemDamageMultiplier = (action) => equippedDefinition()?.damage?.[action] ?? 1;
   const actionCooldownFor = (action) => actions[action].cooldown * (equippedDefinition()?.cooldown?.[action] ?? 1);
 
+  function cooldownWait(action) {
+    const remaining = state.actionCooldowns[action];
+    if (remaining <= STEP_EPSILON) return 0;
+    const steps = Math.ceil((remaining - STEP_EPSILON) / SIM_STEP_SECONDS);
+    return Math.max(0, steps * SIM_STEP_SECONDS - state.pendingTime);
+  }
+
   // --- internal transitions ----------------------------------------------------
 
   function enterDungeon() {
     if (state.mode === 'dungeon') return;
     state.mode = 'dungeon';
     state.started = false;
+    state.trailTimer = 0;
     // Mirrors the rendered trail: the actor always arrives at the entrance
     // vault door, regardless of where they stood in Ravenrest.
-    state.playerX = 0;
-    state.playerZ = 26.8;
+    state.playerX = DUNGEON_ENTRANCE.x;
+    state.playerZ = DUNGEON_ENTRANCE.z;
     state.currentRoomId = 'entrance';
-    state.currentZoneId = null;
+    state.currentZoneId = 'entrance';
     state.discoveredRooms = ['entrance'];
     recomputeVisibleZones();
     record('dungeon-entered', { position: { x: state.playerX, z: state.playerZ } });
@@ -213,8 +222,9 @@ export function createGameCore({
   // discovery and visibility. The decision comes from the shared
   // resolveRoomEntry rule; only state mutation lives here.
   function updateProgression() {
+    if (state.mode !== 'dungeon') return;
     const zone = zoneAtPosition(state.playerX, state.playerZ);
-    if (zone && zone.id !== state.currentZoneId) state.currentZoneId = zone.id;
+    state.currentZoneId = zone?.id ?? null;
     const transition = resolveRoomEntry({
       x: state.playerX,
       z: state.playerZ,
@@ -258,7 +268,7 @@ export function createGameCore({
   // --- semantic actions ----------------------------------------------------------
 
   function startNewGame() {
-    Object.assign(state, makeState());
+    state = makeState();
     events = [];
     record('game-started');
     return { ok: true };
@@ -268,6 +278,7 @@ export function createGameCore({
     if (state.mode !== 'town' || state.finished || state.failed) {
       return { ok: false, reason: 'not-in-town' };
     }
+    if (state.trailTimer > 0) return { ok: false, reason: 'trail-pending' };
     const npc = worldData.town.npcs.find((candidate) => candidate.role === role)
       ?? worldData.town.npcs.find((candidate) => candidate.name === role);
     if (!npc) return { ok: false, reason: 'no-such-npc' };
@@ -292,40 +303,50 @@ export function createGameCore({
   function moveTo(x, z) {
     const maxSteps = 20000;
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
-    const point = { x: state.playerX, z: state.playerZ };
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return { ok: false, reason: 'invalid-position' };
+    const mode = state.mode;
+    const position = () => ({ x: state.playerX, z: state.playerZ });
     for (let stepIndex = 0; stepIndex < maxSteps; stepIndex += 1) {
+      const point = position();
       const dx = x - point.x;
       const dz = z - point.z;
       const distance = Math.hypot(dx, dz);
       if (distance < MOVE_ARRIVE_DISTANCE) {
-        state.playerX = point.x;
-        state.playerZ = point.z;
         updateProgression();
         checkVictory();
-        return { ok: true, steps: stepIndex, position: { x: point.x, z: point.z } };
+        return { ok: true, steps: stepIndex, position: point };
       }
+      const step = Math.min(distance, worldData.player.speed * 1.15 * SIM_STEP_SECONDS);
+      stepActorWithinMap(point, (dx / distance) * step, (dz / distance) * step,
+        navigation.modeBounds(), isTraversable, 0.65);
+      if (distance - Math.hypot(x - point.x, z - point.z) <= STEP_EPSILON) break;
       state.started = true;
-      const speed = worldData.player.speed * 1.15; // matches the auto-walk pace
-      const offsetX = (dx / distance) * speed * MOVE_TICK_SECONDS;
-      const offsetZ = (dz / distance) * speed * MOVE_TICK_SECONDS;
-      stepActorWithinMap(point, offsetX, offsetZ, navigation.modeBounds(), isTraversable, 0.65);
       state.playerX = point.x;
       state.playerZ = point.z;
       updateProgression();
-      advanceTimers(MOVE_TICK_SECONDS);
-      if (state.finished || state.failed) {
-        return { ok: false, reason: 'run-over', position: { x: point.x, z: point.z } };
-      }
+      tick(SIM_STEP_SECONDS);
+      if (state.mode !== mode) return { ok: false, reason: 'scene-changed', position: position() };
+      if (state.failed) return { ok: false, reason: 'run-over', position: position() };
+      if (state.finished) return { ok: true, steps: stepIndex + 1, position: position() };
     }
-    return { ok: false, reason: 'unreachable', position: { x: point.x, z: point.z } };
+    return { ok: false, reason: 'unreachable', position: position() };
   }
 
-  function attemptGateOpen(gate) {
-    const verdict = evaluateGateOpen({
+  function gateOpenVerdict(gate) {
+    return evaluateGateOpen({
       gate,
       currentRoomId: state.currentRoomId,
       livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
+      crossing: gateCrossing({
+        x: state.playerX, z: state.playerZ, room: zoneById.get(state.currentRoomId), gates: state.gates, zoneById,
+      }),
+      seals: state.seals,
+      archiveKey: state.archiveKey,
     });
+  }
+
+  function attemptGateOpen(gate) {
+    const verdict = gateOpenVerdict(gate);
     if (!verdict.ok) {
       record('gate-blocked', { corridorId: gate?.corridorId ?? null, code: verdict.code, message: verdict.message });
       return { ok: false, code: verdict.code, reason: verdict.message };
@@ -357,12 +378,16 @@ export function createGameCore({
     return { ok: true, itemId: drop.itemId, slot };
   }
 
-  function openChestOutcome(chest) {
-    const blockedReason = evaluateChestBlock({
+  function chestBlockReason(chest) {
+    return evaluateChestBlock({
       chest,
       enemies: state.enemies,
       roomBranch,
     });
+  }
+
+  function openChestOutcome(chest) {
+    const blockedReason = chestBlockReason(chest);
     if (blockedReason) {
       record('chest-blocked', { chestId: chest.id, reason: blockedReason });
       return { ok: false, reason: blockedReason };
@@ -370,7 +395,7 @@ export function createGameCore({
     chest.opened = true;
     const summary = applyChestRewards(state, chest, actionKeys);
     record('chest-opened', { chestId: chest.id, kind: summary.kind, healed: summary.healed });
-    return { ok: true, summary };
+    return { ok: true, chestId: chest.id, summary };
   }
 
   function killEnemy(target, action, damage) {
@@ -385,8 +410,11 @@ export function createGameCore({
 
   function useAction(action, targetId = null) {
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
+    if (state.mode !== 'dungeon') return { ok: false, reason: 'not-in-dungeon' };
+    if (typeof action !== 'string' || !Object.hasOwn(actions, action)) {
+      return { ok: false, reason: 'unknown-action' };
+    }
     const actionDef = actions[action];
-    if (!actionDef) return { ok: false, reason: 'unknown-action' };
     const selfAction = action === 'heal' || action === 'buff';
     let target = null;
     if (!selfAction) {
@@ -395,7 +423,7 @@ export function createGameCore({
         return { ok: false, reason: 'invalid-target' };
       }
     }
-    const remaining = state.actionCooldowns[action] ?? 0;
+    const remaining = cooldownWait(action);
     if (remaining > 0) {
       record('action-blocked', { action, reason: 'cooldown', remaining });
       return { ok: false, reason: 'cooldown', remaining };
@@ -431,6 +459,9 @@ export function createGameCore({
 
   function equip(slot) {
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
+    if (!Number.isInteger(slot) || slot < 0 || slot >= state.inventory.length) {
+      return { ok: false, reason: 'invalid-slot' };
+    }
     const itemId = state.inventory[slot];
     if (!itemId) return { ok: false, reason: 'empty-slot' };
     // Mirrors useInventorySlot(): consumables are drunk, not equipped.
@@ -445,6 +476,9 @@ export function createGameCore({
 
   function consume(slot) {
     if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
+    if (!Number.isInteger(slot) || slot < 0 || slot >= state.inventory.length) {
+      return { ok: false, reason: 'invalid-slot' };
+    }
     const itemId = state.inventory[slot];
     const item = itemId ? worldData.items[itemId] : null;
     if (!item || item.kind !== 'consumable') return { ok: false, reason: 'not-consumable' };
@@ -472,6 +506,7 @@ export function createGameCore({
     }
     state.started = true;
     const distanceTo = (x, z) => Math.hypot(state.playerX - x, state.playerZ - z);
+    let blockedLoot = null;
     // Interact targets in production priority order: loot, chest, gate.
     const targets = [
       {
@@ -485,28 +520,35 @@ export function createGameCore({
       {
         kind: 'chest',
         radius: INTERACT_RADII.chest,
-        items: state.chests.filter((chest) => !chest.opened),
+        items: state.chests.filter((chest) => !chest.opened && state.visibleZoneIds.includes(chest.roomId)),
         position: (chest) => chest,
+        usable: (chest) => !chestBlockReason(chest),
         act: (chest) => openChestOutcome(chest),
         lastInteraction: (chest) => ({ kind: 'chest', id: chest.id }),
       },
       {
         kind: 'gate',
         radius: INTERACT_RADII.gate,
-        items: state.gates.filter((gate) => !gate.open),
-        position: (gate) => {
-          const corridor = zoneById.get(gate.corridorId);
-          return { x: (corridor.minX + corridor.maxX) / 2, z: (corridor.minZ + corridor.maxZ) / 2 };
-        },
+        items: state.gates.filter((gate) => !gate.open && gate.roomIds.includes(state.currentRoomId)),
+        position: gatePosition,
+        usable: (gate) => gateOpenVerdict(gate).ok,
         act: (gate) => attemptGateOpen(gate),
         lastInteraction: (gate) => ({ kind: 'gate', id: gate.corridorId }),
       },
     ];
-    for (const { kind, radius, items, position, act, lastInteraction } of targets) {
+    for (const { kind, radius, items, position, usable, act, lastInteraction } of targets) {
       const nearest = items
-        .map((item) => ({ item, d: distanceTo(position(item).x, position(item).z) }))
+        .map((item) => {
+          const { x, z } = position(item);
+          return { item, d: distanceTo(x, z) };
+        })
         .sort((a, b) => a.d - b.d)[0];
       if (!nearest || nearest.d > radius) continue;
+      if (kind === 'loot' && !state.inventory.includes(null)) {
+        blockedLoot = nearest.item;
+        continue;
+      }
+      if (blockedLoot && !usable(nearest.item)) continue;
       const outcome = act(nearest.item);
       if (outcome.ok) {
         state.interactionCount += 1;
@@ -514,6 +556,7 @@ export function createGameCore({
       }
       return { ...outcome, kind };
     }
+    if (blockedLoot) return { ...collectLoot(blockedLoot), kind: 'loot' };
     record('interact-nothing-nearby');
     return { ok: false, reason: 'nothing-nearby' };
   }
@@ -521,12 +564,15 @@ export function createGameCore({
   function advanceTimers(delta) {
     state.elapsed += delta;
     for (const action of actionKeys) {
-      state.actionCooldowns[action] = Math.max(0, state.actionCooldowns[action] - delta);
+      const remaining = state.actionCooldowns[action] - delta;
+      state.actionCooldowns[action] = remaining > STEP_EPSILON ? remaining : 0;
     }
-    state.playerBuffTimer = Math.max(0, state.playerBuffTimer - delta);
+    const buffRemaining = state.playerBuffTimer - delta;
+    state.playerBuffTimer = buffRemaining > STEP_EPSILON ? buffRemaining : 0;
     if (state.trailTimer > 0) {
       state.trailTimer -= delta;
-      if (state.trailTimer <= 0) enterDungeon();
+      if (state.trailTimer <= STEP_EPSILON) enterDungeon();
+      return;
     }
     simulateEnemyAttacks(delta);
   }
@@ -549,8 +595,8 @@ export function createGameCore({
       enemy.awake = true;
       if (distance > profile.attackRange) continue;
       enemy.attackTimer -= delta;
-      if (enemy.attackTimer > 0) continue;
-      enemy.attackTimer = profile.attackCooldown;
+      if (enemy.attackTimer > STEP_EPSILON) continue;
+      enemy.attackTimer += profile.attackCooldown;
       if (state.playerBuffTimer > 0) {
         record('damage-absorbed', { from: enemy.id });
         continue;
@@ -566,11 +612,8 @@ export function createGameCore({
   }
 
   function checkVictory() {
-    if (state.finished || state.failed) return;
-    const objectivesComplete = runObjectivesComplete({
-      wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
-      livingEnemyCount: livingEnemyCount(),
-    });
+    if (state.mode !== 'dungeon' || state.finished || state.failed) return;
+    const objectivesComplete = objectivesAreComplete();
     const distanceToExit = Math.hypot(state.playerX - EXIT_POSITION.x, state.playerZ - EXIT_POSITION.z);
     if (isRunVictory({ objectivesComplete, distanceToExit })) {
       state.finished = true;
@@ -578,16 +621,23 @@ export function createGameCore({
     }
   }
 
-  function tick(delta = 0.1) {
-    // Fixed-step simulation: long ticks resolve in 0.1s slices so cooldowns,
-    // windups, and the trail timer behave identically at any caller cadence.
-    let remaining = Math.max(0, delta);
-    while (remaining > 0 && !state.finished && !state.failed) {
-      const step = Math.min(MOVE_TICK_SECONDS, remaining);
-      remaining -= step;
-      advanceTimers(step);
+  function tick(delta = SIM_STEP_SECONDS) {
+    if (!Number.isFinite(delta) || delta < 0 || !Number.isSafeInteger(Math.floor(delta / SIM_STEP_SECONDS))) {
+      return { ok: false, reason: 'invalid-delta', elapsed: state.elapsed, finished: state.finished };
+    }
+    if (state.finished || state.failed) return { elapsed: state.elapsed, finished: state.finished };
+    state.pendingTime += delta;
+    if (state.mode === 'town' && state.trailTimer <= 0) {
+      const steps = Math.floor((state.pendingTime + STEP_EPSILON) / SIM_STEP_SECONDS);
+      state.elapsed += steps * SIM_STEP_SECONDS;
+      state.pendingTime = Math.max(0, state.pendingTime - steps * SIM_STEP_SECONDS);
+    }
+    while (state.pendingTime >= SIM_STEP_SECONDS - STEP_EPSILON && !state.finished && !state.failed) {
+      state.pendingTime = Math.max(0, state.pendingTime - SIM_STEP_SECONDS);
+      advanceTimers(SIM_STEP_SECONDS);
       checkVictory();
     }
+    if (state.finished || state.failed) state.pendingTime = 0;
     return { elapsed: state.elapsed, finished: state.finished };
   }
 
@@ -596,19 +646,99 @@ export function createGameCore({
     return structuredClone({ state, events });
   }
 
+  // Edited fixtures can change progress. The state shape and world identities stay fixed.
+  function validateCheckpointShape(candidate, template, path = 'state') {
+    const invalid = () => { throw new TypeError(`Invalid checkpoint at ${path}`); };
+    if (Array.isArray(template)) {
+      if (!Array.isArray(candidate) || (template.length > 0 && candidate.length !== template.length)) invalid();
+      template.forEach((entry, index) => validateCheckpointShape(candidate[index], entry, `${path}[${index}]`));
+    } else if (template && typeof template === 'object') {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) invalid();
+      for (const [key, value] of Object.entries(template)) {
+        if (!Object.hasOwn(candidate, key)) invalid();
+        validateCheckpointShape(candidate[key], value, `${path}.${key}`);
+      }
+    } else if (template !== null && (typeof candidate !== typeof template
+      || (typeof template === 'number' && !Number.isFinite(candidate)))) {
+      invalid();
+    }
+  }
+
   function loadCheckpoint(checkpoint) {
-    Object.assign(state, structuredClone(checkpoint.state));
-    events = structuredClone(checkpoint.events ?? []);
+    const { state: restored, events: history } = structuredClone(checkpoint ?? {});
+    if (!restored || typeof restored !== 'object' || Array.isArray(restored)) {
+      throw new TypeError('Invalid checkpoint state');
+    }
+    restored.pendingTime ??= 0;
+    const initial = makeState();
+    validateCheckpointShape(restored, { ...initial, discoveredRooms: [], visibleZoneIds: [] });
+    for (const drop of restored.loot) {
+      validateCheckpointShape(drop, { id: '', itemId: '', x: 0, z: 0, collected: false }, 'loot');
+      if (!Object.hasOwn(worldData.items, drop.itemId)) throw new TypeError('Invalid checkpoint loot item');
+    }
+    const log = history ?? [];
+    validateCheckpointShape(log, [], 'events');
+    for (const event of log) validateCheckpointShape(event, { t: 0, type: '' }, 'event');
+    const equipped = restored.equippedSlot;
+    const openGates = restored.gates.filter((gate) => gate.open);
+    if (
+      (equipped !== null && (!Number.isInteger(equipped) || equipped < 0 || equipped >= restored.inventory.length
+        || worldData.items[restored.inventory[equipped]]?.kind !== 'equipment'))
+      || Array.from(restored.inventory).some((itemId) =>
+        itemId !== null && (typeof itemId !== 'string' || !Object.hasOwn(worldData.items, itemId)))
+      || !['town', 'dungeon'].includes(restored.mode)
+      || !roomIds.has(restored.currentRoomId) || (restored.currentZoneId !== null && !zoneById.has(restored.currentZoneId))
+      || Array.from(restored.discoveredRooms).some((id) => !roomIds.has(id))
+      || Array.from(restored.visibleZoneIds).some((id) => !zoneById.has(id))
+      || restored.playerMaxHp !== initial.playerMaxHp || restored.playerHp < 0 || restored.playerHp > restored.playerMaxHp
+      || restored.pendingTime < 0 || restored.pendingTime >= SIM_STEP_SECONDS
+      || actionKeys.some((action) => restored.actionCooldowns[action] < 0)
+      || restored.enemies.length !== initial.enemies.length || restored.enemies.some((enemy, index) =>
+        enemy.id !== initial.enemies[index].id || enemy.roomId !== initial.enemies[index].roomId
+        || enemy.profileKey !== initial.enemies[index].profileKey || enemy.maxHp !== initial.enemies[index].maxHp
+        || enemy.hp < 0 || enemy.hp > enemy.maxHp)
+      || restored.chests.length !== initial.chests.length || restored.chests.some((chest, index) =>
+        chest.id !== initial.chests[index].id || chest.roomId !== initial.chests[index].roomId
+        || chest.kind !== initial.chests[index].kind || chest.branch !== initial.chests[index].branch)
+      || restored.gates.length !== initial.gates.length
+      || restored.gates.some((gate, index) => gate.corridorId !== initial.gates[index].corridorId
+        || Array.from(gate.roomIds).some((id, endpoint) => id !== initial.gates[index].roomIds[endpoint])
+        || (gate.open
+          ? gate.fromRoomId === gate.toRoomId || !gate.roomIds.includes(gate.fromRoomId) || !gate.roomIds.includes(gate.toRoomId)
+          : gate.fromRoomId !== null || gate.toRoomId !== null))
+      || openGates.length > 1 || openGates.some((gate) => gate.fromRoomId !== restored.currentRoomId)
+    ) {
+      throw new TypeError('Invalid checkpoint');
+    }
+    if (restored.failed !== (restored.playerHp === 0)
+      || ((restored.failed || restored.finished) && restored.mode !== 'dungeon')
+      || (restored.finished && (restored.failed || !isRunVictory({
+        objectivesComplete: objectivesAreComplete(restored),
+        distanceToExit: Math.hypot(restored.playerX - EXIT_POSITION.x, restored.playerZ - EXIT_POSITION.z),
+      })))) {
+      throw new TypeError('Invalid checkpoint outcome');
+    }
+    // Older clearRoom fixtures marked deaths without clearing vitality.
+    for (const enemy of restored.enemies) {
+      if (enemy.dead) enemy.hp = 0;
+    }
+    if (restored.mode === 'dungeon') restored.trailTimer = 0;
+    state = restored;
+    events = log;
     return { ok: true };
   }
   // --- structured state / debug representation ---------------------------------------
 
-  function describe() {
-    const wardenSpoilsOpened = Boolean(chestById('warden-spoils')?.opened);
-    const objectivesComplete = runObjectivesComplete({
-      wardenSpoilsOpened,
-      livingEnemyCount: livingEnemyCount(),
+  function objectivesAreComplete(run = state) {
+    return runObjectivesComplete({
+      seals: run.seals,
+      archiveKey: run.archiveKey,
+      wardenSpoilsOpened: run.chests.find((chest) => chest.id === 'warden-spoils')?.opened,
+      livingEnemyCount: run.enemies.filter((enemy) => !enemy.dead).length,
     });
+  }
+
+  function describe() {
     return structuredClone({
       mode: state.mode,
       started: state.started,
@@ -621,7 +751,7 @@ export function createGameCore({
         hp: state.playerHp,
         maxHp: state.playerMaxHp,
         buffTimer: state.playerBuffTimer,
-        cooldowns: { ...state.actionCooldowns },
+        cooldowns: Object.fromEntries(actionKeys.map((action) => [action, cooldownWait(action)])),
         inventory: [...state.inventory],
         equippedSlot: state.equippedSlot,
       },
@@ -658,8 +788,8 @@ export function createGameCore({
         eastSeal: state.seals.east,
         archiveKey: state.archiveKey,
         wardenRelicObtained: state.inventory.includes('wardenRelic'),
-        wardenSpoilsOpened,
-        complete: objectivesComplete,
+        wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
+        complete: objectivesAreComplete(),
       },
       interactionCount: state.interactionCount,
       lastInteraction: state.lastInteraction ? { ...state.lastInteraction } : null,
@@ -680,12 +810,14 @@ export function createGameCore({
     consume,
     // test affordance mirroring __cryptTest.clearRoom
     clearRoom(roomId) {
-      for (const enemy of state.enemies) {
-        if (enemy.roomId !== roomId || enemy.dead) continue;
+      if (state.finished || state.failed) return { ok: false, reason: 'run-over' };
+      const guardians = livingEnemiesInRoom(roomId);
+      for (const enemy of guardians) {
+        enemy.hp = 0;
         enemy.dead = true;
         spawnLoot(enemy);
       }
-      record('room-cleared', { roomId });
+      if (guardians.length > 0) record('room-cleared', { roomId });
       return { ok: true, roomId };
     },
     // time / checkpoints / inspection
