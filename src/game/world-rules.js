@@ -59,10 +59,9 @@ export function gateWallPosition(corridor, room, travelsAlongZ) {
   };
 }
 
-export function gateCrossing({ x, z, room, gates, zoneById }) {
-  const gate = gates.find((candidate) => candidate.open && candidate.fromRoomId === room.id);
-  return Boolean(gate && zoneContains(zoneById.get(gate.corridorId), x, z, -ROOM_ENTRY_CLEARANCE)
-    && !zoneContains(room, x, z, ROOM_ENTRY_CLEARANCE));
+export function gateCrossing({ x, z, room, gates }) {
+  return gates.some((gate) => gate.open && gate.fromRoomId === room.id)
+    && !zoneContains(room, x, z, ROOM_ENTRY_CLEARANCE);
 }
 
 export function applyGateOpen(gates, gate, currentRoomId) {

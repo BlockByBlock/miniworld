@@ -57,6 +57,7 @@ const E2E_ENABLED = new URLSearchParams(window.location.search).has('e2e');
 const loadingScreen = $('#loading');
 const loadingFill = $('#loading-fill');
 const loadingLabel = $('#loading-label');
+const renderStatus = $('#render-status');
 const endScreen = $('#end-screen');
 const endEyebrow = $('#end-eyebrow');
 const endTitle = $('#end-title');
@@ -191,6 +192,8 @@ const state = {
 };
 
 const isRunActive = () => state.loaded && !state.finished && !state.failed;
+const canPlay = () => isRunActive() && !renderingPaused;
+let renderingPaused = false;
 
 const keys = new Set();
 const assets = new Map();
@@ -375,6 +378,21 @@ function initializeRenderer() {
   loader.setMeshoptDecoder(MeshoptDecoder);
 }
 
+function pauseRendering() {
+  renderingPaused = true;
+  controls.enabled = false;
+  clearInputState();
+  renderStatus.classList.remove('is-hidden');
+}
+
+function resumeRendering() {
+  renderingPaused = false;
+  controls.enabled = isRunActive() || !state.loaded;
+  clock.getDelta();
+  renderStatus.classList.add('is-hidden');
+  if (state.teleporting && trailTimeout === null) enterDungeon();
+}
+
 const clock = new THREE.Clock();
 const tempVector = new THREE.Vector3();
 const tempBox = new THREE.Box3();
@@ -391,7 +409,7 @@ const worldUp = new THREE.Vector3(0, 1, 0);
 
 let player;
 let toastTimeout;
-let trailTimeout;
+let trailTimeout = null;
 let pointerPress = null;
 let selectedTarget = null;
 let moonLight = null;
@@ -1691,6 +1709,9 @@ function updateZoneVisibility(roomId, force = false) {
   zoneRenderGroups.forEach((group, id) => {
     group.visible = visibleZoneIds.has(id);
   });
+  for (const enemy of enemies) {
+    if (!isEnemyAccessible(enemy)) enemy.pendingEnemyAttack = null;
+  }
   applyDungeonLights();
   const profile = window.__cryptProfile;
   if (profile?.active) profile.zones.push({ t: performance.now(), visible: [...visibleZoneIds] });
@@ -1730,8 +1751,9 @@ function nearestTownNpc(maxDistance = Infinity) {
 }
 
 function enterDungeon() {
-  if (!isRunActive() || state.mode === 'dungeon') return;
+  if (!canPlay() || state.mode === 'dungeon') return;
   window.clearTimeout(trailTimeout);
+  trailTimeout = null;
   state.mode = 'dungeon';
   state.teleporting = false;
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
@@ -1765,7 +1787,10 @@ function talkToTownNpc(npc) {
     state.teleporting = true;
     showDialogue(npc.name, 'The old bell has started ringing below the hill. Follow my mark into the crypt.', 1500);
     setToast('The hunter opens a trail beneath Ravenrest…', 1500);
-    trailTimeout = window.setTimeout(enterDungeon, 900);
+    trailTimeout = window.setTimeout(() => {
+      trailTimeout = null;
+      enterDungeon();
+    }, 900);
     return;
   }
   showDialogue(npc.name, npc.role === 'Town guard'
@@ -1787,6 +1812,10 @@ function livingEnemiesInRoom(roomId) {
 
 function isEnemyAccessible(enemy) {
   return visibleZoneIds.has(enemy.roomId);
+}
+
+function isTargetableEnemy(enemy) {
+  return enemy && enemy !== player && !enemy.dead && enemy.root.visible && isEnemyAccessible(enemy);
 }
 
 function returnCrossingGuardians(gate, roomId) {
@@ -1887,11 +1916,11 @@ function pickActor(clientX, clientY) {
     -(clientY / window.innerHeight) * 2 + 1,
   );
   raycaster.setFromCamera(pointerNdc, camera);
-  const actorRoots = [player.root, ...enemies.map((enemy) => enemy.root)];
+  const actorRoots = [player.root, ...enemies.filter(isTargetableEnemy).map((enemy) => enemy.root)];
   const hits = raycaster.intersectObjects(actorRoots, true);
   for (const hit of hits) {
     const actor = actorFromObject(hit.object);
-    if (actor && !actor.dead && (actor === player || isEnemyAccessible(actor))) return actor;
+    if (actor) return actor;
   }
   return null;
 }
@@ -1923,8 +1952,8 @@ function clearSelectedTarget({ silent = false } = {}) {
 }
 
 function selectTarget(target) {
-  if (!isRunActive() || state.mode !== 'dungeon') return;
-  if (!target || target.dead || (target !== player && !isEnemyAccessible(target))) {
+  if (!canPlay() || state.mode !== 'dungeon') return;
+  if (target !== player && !isTargetableEnemy(target)) {
     clearSelectedTarget({ silent: true });
     return;
   }
@@ -1937,9 +1966,9 @@ function selectTarget(target) {
 }
 
 function updateTargetMarker(delta = 0) {
-  if (!targetMarker || !selectedTarget || selectedTarget === player || selectedTarget.dead || !isEnemyAccessible(selectedTarget)) {
+  if (!targetMarker || !isTargetableEnemy(selectedTarget)) {
     if (targetMarker) targetMarker.visible = false;
-    if (selectedTarget && (selectedTarget.dead || !isEnemyAccessible(selectedTarget))) {
+    if (selectedTarget && selectedTarget !== player) {
       clearSelectedTarget({ silent: true });
     }
     return;
@@ -1969,12 +1998,7 @@ function updateTargetUi() {
     targetCard.classList.add('is-hidden');
     return;
   }
-  const target = selectedTarget
-    && selectedTarget !== player
-    && !selectedTarget.dead
-    && isEnemyAccessible(selectedTarget)
-    ? selectedTarget
-    : null;
+  const target = isTargetableEnemy(selectedTarget) ? selectedTarget : null;
   if (!target) {
     targetCard.classList.add('is-hidden');
     return;
@@ -1993,16 +2017,10 @@ function updateTargetUi() {
 }
 
 function updateActionUi() {
+  const target = isTargetableEnemy(selectedTarget) ? selectedTarget : null;
   for (const slot of abilitySlots) {
     const action = slot.dataset.ability;
     const remaining = state.actionCooldowns[action] ?? 0;
-    const total = actionCooldownFor(action);
-    const target = selectedTarget
-      && selectedTarget !== player
-      && !selectedTarget.dead
-      && isEnemyAccessible(selectedTarget)
-      ? selectedTarget
-      : null;
     const needsTarget = action !== 'heal' && action !== 'buff';
     const outOfRange = target && needsTarget
       ? player.root.position.distanceTo(target.root.position) > ACTIONS[action].range
@@ -2068,7 +2086,7 @@ function updateInventoryUi() {
 function useInventorySlot(index) {
   const itemId = state.inventory[index];
   const item = itemId ? ITEM_DEFS[itemId] : null;
-  if (!item || !isRunActive() || state.mode !== 'dungeon') return;
+  if (!item || !canPlay() || state.mode !== 'dungeon') return;
   initAudio();
   if (item.kind === 'consumable') {
     if (state.playerHp >= state.playerMaxHp) {
@@ -2233,14 +2251,14 @@ function gateOpenVerdict(gate) {
     gate,
     currentRoomId: state.currentRoomId,
     livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
-    crossing: gateCrossing({ x, z, room: ZONE_BY_ID.get(state.currentRoomId), gates: state.gates, zoneById: ZONE_BY_ID }),
+    crossing: gateCrossing({ x, z, room: ZONE_BY_ID.get(state.currentRoomId), gates: state.gates }),
     seals: state.seals,
     archiveKey: state.archiveKey,
   });
 }
 
 function openGate(gate) {
-  if (!isRunActive() || state.mode !== 'dungeon') return;
+  if (!canPlay() || state.mode !== 'dungeon') return;
   const verdict = gateOpenVerdict(gate);
   if (!verdict.ok) {
     if (verdict.message) setToast(verdict.message, 1800);
@@ -2830,6 +2848,7 @@ function updateTelegraphs(delta) {
   for (let index = telegraphs.length - 1; index >= 0; index -= 1) {
     const telegraph = telegraphs[index];
     const canceled = telegraph.enemy.dead || telegraph.enemy.frozenTimer > 0
+      || !isEnemyAccessible(telegraph.enemy)
       || telegraph.enemy.pendingEnemyAttack !== telegraph.attack;
     telegraph.life -= delta;
     if (canceled || telegraph.life <= 0) {
@@ -2898,7 +2917,7 @@ function applyPlayerAction() {
     applySelfAction(action);
     return;
   }
-  if (!target || target.dead) return;
+  if (!isTargetableEnemy(target)) return;
 
   const distance = player.root.position.distanceTo(target.root.position);
   if (distance > ACTIONS[action].range) return;
@@ -2933,14 +2952,12 @@ function applySelfAction(action) {
 }
 
 function useAction(action, target = selectedTarget) {
-  if (!isRunActive() || state.mode !== 'dungeon') return;
+  if (!canPlay() || state.mode !== 'dungeon') return;
   const actionDef = ACTIONS[action];
   if (!actionDef) return;
   const selfAction = action === 'heal' || action === 'buff';
-  if (!selfAction && (!target || target === player || target.dead || !isEnemyAccessible(target))) {
-    if (target?.dead || (target && target !== player && !isEnemyAccessible(target))) {
-      clearSelectedTarget({ silent: true });
-    }
+  if (!selfAction && !isTargetableEnemy(target)) {
+    if (target && target !== player) clearSelectedTarget({ silent: true });
     setToast('Select a living enemy target first.', 1100);
     return;
   }
@@ -2983,8 +3000,8 @@ function useAction(action, target = selectedTarget) {
 }
 
 function attemptAttack() {
-  if (!isRunActive() || state.mode !== 'dungeon') return;
-  const target = selectedTarget && selectedTarget !== player && !selectedTarget.dead ? selectedTarget : null;
+  if (!canPlay() || state.mode !== 'dungeon') return;
+  const target = isTargetableEnemy(selectedTarget) ? selectedTarget : null;
   if (!target) {
     state.started = true;
     setToast('Select an enemy target first.');
@@ -3495,7 +3512,7 @@ function openChest(chest) {
 }
 
 function interact() {
-  if (!isRunActive()) return;
+  if (!canPlay()) return;
   if (state.mode === 'town') {
     const nearbyNpc = nearestTownNpc(INTERACT_RADII.npc);
     if (nearbyNpc && !state.teleporting) {
@@ -3582,7 +3599,7 @@ async function loadAssets() {
 }
 
 function onKeyDown(event) {
-  if (!isRunActive()) return;
+  if (!canPlay()) return;
   const target = event.target;
   if (target instanceof Element) {
     if (target.closest('input, textarea, select, [contenteditable]')) return;
@@ -3633,6 +3650,7 @@ function updateTownActors(delta) {
 function animate() {
   requestAnimationFrame(animate);
   const frameDelta = clock.getDelta();
+  if (renderingPaused) return;
   updateAdaptiveQuality(frameDelta);
   const delta = Math.min(frameDelta, 0.05);
   if (isRunActive()) {
@@ -3722,7 +3740,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) clearInputState();
 });
 canvas.addEventListener('pointerdown', (event) => {
-  if (!isRunActive() || event.button !== 0) return;
+  if (!canPlay() || event.button !== 0) return;
   initAudio();
   if (state.mode !== 'dungeon' || pointerPress) return;
   pointerPress = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now() };
@@ -3765,6 +3783,8 @@ async function start() {
     loadingFill.style.background = '#b5656b';
     return;
   }
+  canvas.addEventListener('webglcontextlost', pauseRendering);
+  canvas.addEventListener('webglcontextrestored', resumeRendering);
   try {
     animate();
     await loadAssets();
@@ -3803,6 +3823,7 @@ window.__cryptMark = (label) => {
 function diagnosticBlockReason() {
   if (!E2E_ENABLED) return 'Open the game with ?e2e to run diagnostics.';
   if (!state.loaded) return 'Wait for the game to finish loading.';
+  if (renderingPaused) return 'Wait for the graphics context to recover.';
   if (e2eState.activeDiagnostic) return 'Another diagnostic is already running.';
   if (e2eState.routeUsed || state.mode !== 'town' || state.teleporting) {
     return 'Reload the page to start a diagnostic from town.';
@@ -3850,6 +3871,7 @@ window.__cryptRun = async (instant = false) => {
       await walkTo(rowan.root.position.x, rowan.root.position.z);
       window.__cryptMark('town:at-rowan');
       talkToTownNpc(rowan);
+      window.__cryptWalkTarget = null;
       await wait(1400);
       if (state.mode !== 'dungeon') throw new Error('Profile route did not enter the dungeon.');
     } else {
@@ -3998,6 +4020,11 @@ if (E2E_ENABLED) {
       openFastGate('west-drop');
       interactChestAt('west-seal', -47, -13);
 
+      openFastGate('west-drop');
+      placeAt(-47, 9);
+      openFastGate('west-deep-corridor');
+      placeAt(-26, 9);
+      openFastGate('west-corridor');
       placeAt(0, 12);
       openFastGate('east-corridor');
       placeAt(26, 9);
@@ -4007,6 +4034,11 @@ if (E2E_ENABLED) {
       openFastGate('east-drop');
       interactChestAt('east-seal', 47, -12.5);
 
+      openFastGate('east-drop');
+      placeAt(47, 9);
+      openFastGate('east-deep-corridor');
+      placeAt(26, 9);
+      openFastGate('east-corridor');
       placeAt(0, 12);
       openFastGate('north-corridor');
       placeAt(0, -10);
@@ -4016,8 +4048,13 @@ if (E2E_ENABLED) {
       openFastGate('warden-corridor');
       placeAt(0, -42);
       interactChestAt('warden-spoils', 0, -47.5);
-      // Use the real southern exit and let the animation loop invoke the
-      // production completion condition after objectives are complete.
+      openFastGate('warden-corridor');
+      placeAt(0, -24);
+      openFastGate('archive-corridor');
+      placeAt(0, -10);
+      openFastGate('north-corridor');
+      placeAt(0, 12);
+      openFastGate('entry-corridor');
       placeAt(0, 32.4);
       await new Promise((resolve) => window.requestAnimationFrame(resolve));
       await new Promise((resolve) => window.requestAnimationFrame(resolve));
@@ -4032,7 +4069,8 @@ if (E2E_ENABLED) {
         lootRevealed,
         lootCollected: lootDrop.collected && lootDrop.root.parent === null,
         interacted: snapshot.interactionCount >= requiredChestIds.length + 4,
-        gateTraversal: e2eState.fastGateTransitions === state.gates.length,
+        gateTraversal: e2eState.fastGateTransitions === state.gates.length * 2
+          && snapshot.gates.every((gate) => !gate.open),
         objectives: snapshot.objectives.complete,
       };
       setE2eResult({

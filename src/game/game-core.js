@@ -338,7 +338,7 @@ export function createGameCore({
       currentRoomId: state.currentRoomId,
       livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
       crossing: gateCrossing({
-        x: state.playerX, z: state.playerZ, room: zoneById.get(state.currentRoomId), gates: state.gates, zoneById,
+        x: state.playerX, z: state.playerZ, room: zoneById.get(state.currentRoomId), gates: state.gates,
       }),
       seals: state.seals,
       archiveKey: state.archiveKey,

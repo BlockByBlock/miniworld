@@ -20,8 +20,8 @@ averaged frame time; the renderer uses a single instanced blob-shadow pass for
 lightweight, consistent shadows.
 The western and eastern seals open the northern route. Clear Catacomb Crossing
 and the Silent Archive to claim the key to the Warden's Keep. At half health,
-the Warden enters a second phase, accelerates, changes the crypt lighting, and casts a player-targeted
-Soul Collapse that must be dodged. A schematic minimap, selected-target frame,
+the Warden enters a second phase, accelerates, changes the crypt lighting, and
+casts a player-targeted Soul Collapse that must be dodged. A schematic minimap, selected-target frame,
 action-bar cooldowns, projected enemy nameplates and cast bars, combat status, and
 floating feedback keep the larger delve readable. Fire and Frostbolt use
 distinct cast clips, travelling projectiles, and impact timing; Heal resolves

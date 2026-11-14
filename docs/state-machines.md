@@ -114,11 +114,13 @@ P1 covers bypassing required progression or losing a run due to an invalid trans
 | 10 | Canceled ground casts dispose of their warning before it can resolve. |
 | 11 | A failed WebGL startup displays a loading error. |
 
+The PR review added a crossing check for sideways movement along the destination wall. It also checked both directions of every gate in the browser checkpoint, excluded culled actors from targeting, and canceled pending attacks when their room was hidden.
+
 ## State machines
 
 ### Boot, scene and run outcome
 
-**State.** `mode` has explicit values `town` and `dungeon`. Readiness, pending entry, activity and outcome are represented by `loaded`, `teleporting` or `trailTimer`, `started`, browser `combatStarted`, and the `finished` and `failed` flags. The headless core is usable immediately. Browser startup spans sequential asset loads, world construction and two scene compiles. [Browser state](../src/main.js#L148-L191), [browser startup](../src/main.js#L3566-L3580), [headless state](../src/game/game-core.js#L82-L143).
+**State.** `mode` has explicit values `town` and `dungeon`. Readiness, pending entry, activity and outcome are represented by `loaded`, `teleporting` or `trailTimer`, `started`, browser `combatStarted`, and the `finished` and `failed` flags. The headless core is usable immediately. Browser startup spans sequential asset loads, world construction and two scene compiles. [Browser state](../src/main.js#L149-L192), [browser startup](../src/main.js#L3583-L3597), [headless state](../src/game/game-core.js#L82-L143).
 
 **Invariants.** The town and dungeon have separate bounds and only the active scene renders. A pending trail belongs to the town session. Entering the crypt puts the player in the Entrance Vault and resets discovery. `started` and `combatStarted` indicate activity and enemy activation. The run is active until one outcome flag is set. Defeat requires zero player HP. The terminal result is stable until restart or a headless restore. See issues [2](#2-stop-headless-movement-at-simulation-boundaries), [4](#4-freeze-gameplay-and-hud-at-the-terminal-transition), [5](#5-route-input-according-to-focus-and-game-mode), [9](#9-validate-headless-commands-and-stabilize-timer-stepping) and [11](#11-show-a-startup-error-when-webgl-is-unavailable).
 
@@ -127,6 +129,8 @@ P1 covers bypassing required progression or losing a run due to an invalid trans
 | Browser module setup | Renderer created and startup starts | Loading assets, then building and compiling the world |
 | Loading or compiling | All assets and compiles succeed | Ready in town. The loading card hides after 420 ms |
 | Renderer setup, loading or compiling | Startup fails | Loading card displays the WebGL or asset error |
+| Renderer available | WebGL context lost | Pause frames and gameplay input, clear held input and show the graphics status |
+| Renderer paused | WebGL context restored | Resume frames and controls when the run permits them. Complete an overdue town trail |
 | Town ready | Talk to a non-Hunter NPC | Town ready with transient dialogue |
 | Town ready | Interact with Rowan within reach | Trail pending for about 0.9 s. Browser schedules a timeout. Headless arms a timer |
 | Trail pending | Repeat the interaction | Original deadline stays in place. Headless returns `trail-pending` |
@@ -136,7 +140,7 @@ P1 covers bypassing required progression or losing a run due to an invalid trans
 | Dungeon active | Unabsorbed damage reduces HP to zero | `failed = true`. Browser shows the defeat card. Headless records failure |
 | Terminal | Browser restart button or headless `startNewGame()` | Browser reloads. Headless replaces state and clears the event log |
 
-Sources for the entry and terminal transitions. [Browser entry](../src/main.js#L1732-L1774), [outcome and restart](../src/main.js#L3525-L3568), [browser frame](../src/main.js#L3631-L3708), [headless entry and reset](../src/game/game-core.js#L205-L221), [headless talk](../src/game/game-core.js#L272-L303), [headless timers and outcome](../src/game/game-core.js#L566-L644).
+Sources for the entry and terminal transitions. [Browser entry](../src/main.js#L1753-L1799), [outcome and restart](../src/main.js#L3542-L3585), [browser frame](../src/main.js#L3648-L3726), [headless entry and reset](../src/game/game-core.js#L205-L221), [headless talk](../src/game/game-core.js#L272-L303), [headless timers and outcome](../src/game/game-core.js#L566-L644).
 
 ### Movement, gates, room entry and visibility
 
@@ -152,11 +156,11 @@ Sources for the entry and terminal transitions. [Browser entry](../src/main.js#L
 | One gate open | Another gate is successfully opened | First gate closes and clears its endpoints. Browser remounts it at its source |
 | Open gate, source room active | Player moves into corridor or enters the destination before full clearance | Zone may change. Source remains the current room and gate remains open |
 | Crossing | Request to open a different gate | Reject with `crossing` |
-| Crossing | Player retreats into source | Source remains active and the gate stays open |
+| Crossing | Player retreats inside the source room inset | Source remains active and the gate stays open. The player can switch gates again |
 | Crossing | Player reaches the destination inset | Record destination room and discovery. Return browser guardians caught on the wrong side. Close the traversed gate and recompute visibility |
 | Render group hidden or visible | Visible set changes | Toggle group and update pooled lights. Hidden groups skip matrix updates. Headless keeps the visible IDs for eligibility |
 
-[Movement and collision checks](../src/movement-contracts.js#L36-L77), [shared gate verdict and replacement](../src/game/world-rules.js#L19-L82), [visibility and room-entry rules](../src/game/world-rules.js#L205-L236), [browser gate build](../src/main.js#L1451-L1506), [browser transition](../src/main.js#L1809-L1848), [headless movement and gate action](../src/game/game-core.js#L305-L369), [visibility group](../src/visibility-group.js#L1-L8).
+[Movement and collision checks](../src/movement-contracts.js#L36-L77), [shared gate verdict and replacement](../src/game/world-rules.js#L19-L81), [visibility and room-entry rules](../src/game/world-rules.js#L204-L235), [browser gate build](../src/main.js#L1469-L1524), [browser transition](../src/main.js#L1838-L1877), [headless movement and gate action](../src/game/game-core.js#L305-L369), [visibility group](../src/visibility-group.js#L1-L8).
 
 ### Objectives, chests, loot and equipment
 
@@ -191,11 +195,11 @@ The browser objective table selects the first matching row on each HUD update. I
 | Spoils closed | Claim the Warden's spoils |
 | Remaining cases | Return to the entrance |
 
-The victory predicate requires the seals, key, open spoils chest, zero living guardians and the exit. The HUD uses the same seal check and Archive guardian scope. [Chest wards, rewards and drop selection](../src/game/world-rules.js#L84-L144), [victory inputs](../src/game/world-rules.js#L182-L186), [objective table and HUD](../src/main.js#L2271-L2336), [browser interaction commit](../src/main.js#L3459-L3523), [headless chest and inventory operations](../src/game/game-core.js#L371-L401), [headless equipment and interactions](../src/game/game-core.js#L462-L564).
+The victory predicate requires the seals, key, open spoils chest, zero living guardians and the exit. The HUD uses the same seal check and Archive guardian scope. [Chest wards, rewards and drop selection](../src/game/world-rules.js#L83-L143), [victory inputs](../src/game/world-rules.js#L181-L185), [objective table and HUD](../src/main.js#L2289-L2354), [browser interaction commit](../src/main.js#L3476-L3540), [headless chest and inventory operations](../src/game/game-core.js#L371-L401), [headless equipment and interactions](../src/game/game-core.js#L462-L564).
 
 ### Browser input, targeting, action and Ward
 
-**State.** Input uses a set of held movement keys and one `pointerPress` record. The selection is empty, self or an accessible living enemy. A pending action has an action ID, a timer and, for attacks, its own target reference. Global recovery and per-ability cooldowns run independently. A Fire or Frostbolt cast can launch a separate projectile. Ward is inactive or active with a remaining duration. The sword can be sheathed or drawn.
+**State.** Input uses a set of held movement keys and one `pointerPress` record. The selection is empty, self or a rendered, accessible living enemy. A pending action has an action ID, a timer and, for attacks, its own target reference. Global recovery and per-ability cooldowns run independently. A Fire or Frostbolt cast can launch a separate projectile. Ward is inactive or active with a remaining duration. The sword can be sheathed or drawn.
 
 **Invariants.** A cast owns its target from acceptance through resolution. Per-ability cooldown and global recovery must permit a new action. HP stays between zero and max HP. Ward absorbs damage while active. Movement is relative to the camera and locked during an attack lock. A terminal run should accept no gameplay input or pending combat. See issues [4](#4-freeze-gameplay-and-hud-at-the-terminal-transition) and [5](#5-route-input-according-to-focus-and-game-mode).
 
@@ -205,15 +209,15 @@ The victory predicate requires the seals, key, open spoils chest, zero living gu
 | Movement key down | Keyup, window blur or hidden document | Clear the released key or the full input state |
 | No pending pointer press | Left pointer down on canvas | Store screen position and time |
 | Pointer press recorded | Owning pointer up within 8 px and under 500 ms | Raycast and select a valid actor, or clear selection. A drag, long press or cancellation clears the gesture |
-| Selected | Escape, empty click, death, inaccessibility or run result | Clear selection and target marker. A running cast still holds its original target |
+| Selected | Escape, empty click, death, culling or run result | Clear selection and target marker. A running cast still holds its original target |
 | Action ready | Active dungeon, valid target and range for attack or valid self-action, and recovery and cooldown ready | Arm the windup, set lock and cooldowns, and start animation and spell visuals |
-| Windup | Timer expires | Sword hits a living target still in range. Fire and Frostbolt launch on the same check. Heal or Ward resolves on the player |
+| Windup | Timer expires | Sword hits a targetable enemy still in range. Fire and Frostbolt launch on the same check. Heal or Ward resolves on the player |
 | Projectile in flight | Travel completes | Remove projectile. Fire damages a living target. Frostbolt damages, freezes and cancels its pending attack |
 | Ward inactive | Ward resolves | Eight seconds of protection, increased player damage and movement speed, and a shell visual |
 | Ward active | Timer expires or the run ends | Clear protection and shell |
 | Sword sheathed or drawn | Frame checks the readiness timer, nearby awake threats and attack lock | Draw for active combat. Sheathe when all three checks clear |
 
-Headless `useAction()` validates ability, target, cooldown and range and applies its effect immediately. It tracks Ward protection and the damage multiplier. Its Frostbolt applies damage with the ability cooldown. [Browser input](../src/main.js#L3582-L3619), [pointer listeners](../src/main.js#L3716-L3755), [selection](../src/main.js#L1899-L1953), [cast and recovery](../src/main.js#L2891-L3064), [projectile impact](../src/main.js#L2648-L2679), [headless action](../src/game/game-core.js#L413-L460).
+Headless `useAction()` validates ability, target, cooldown and range and applies its effect immediately. It tracks Ward protection and the damage multiplier. Its Frostbolt applies damage with the ability cooldown. [Browser input](../src/main.js#L3599-L3636), [pointer listeners](../src/main.js#L3734-L3773), [selection](../src/main.js#L1928-L1982), [cast and recovery](../src/main.js#L2910-L3081), [projectile impact](../src/main.js#L2666-L2697), [headless action](../src/game/game-core.js#L413-L460).
 
 ### Enemy behavior, ground attacks and the Warden
 
@@ -227,6 +231,7 @@ Headless `useAction()` validates ability, target, cooldown and range and applies
 | Awake with no pending attack | Choose behavior from profile and distance | Chase or face the player. Ranged enemies can back away. Support can heal the weakest nearby injured ally |
 | Awake melee enemy | In range, unlocked and cooldown ready | Melee windup. At expiry, recheck range, then hit or miss |
 | Awake ranged enemy or Warden | Eligible for ground cast | Store pending attack and show warning. Cancellation disposes of the warning. A live cast resolves at expiry |
+| Casting | Home room is hidden | Clear the pending cast and dispose of its ground warning |
 | Awake or casting | Frostbolt hits | Freeze, clear pending attack, resume when thawed. The Warden freezes for 3.5 s, other profiles for 6 s |
 | Awake | Position exceeds leash from spawn | Evade, cancel attack and return toward spawn |
 | Evading | Within 0.32 of spawn | Snap to spawn, restore HP and go dormant with a short cooldown. Warden phase and summon flag persist |
@@ -234,7 +239,7 @@ Headless `useAction()` validates ability, target, cooldown and range and applies
 | Warden with summon unused | Alive and eligible for a combat update at or below 55% HP | Spawn two thralls and set the summon flag |
 | Warden phase I | Alive and eligible for a combat update at or below 50% HP | Enter phase II, increase speed, tint lighting and switch the special from Slam to Soul Collapse |
 
-Headless enemies hold spawn positions. Their states are dormant, awake outside attack range, waiting on an attack timer, hitting or having the hit absorbed, and dead. The headless Warden uses that same timer model with its own stats. [Browser AI and attacks](../src/main.js#L3066-L3317), [combat frame and culling](../src/main.js#L3653-L3670), [death and loot](../src/main.js#L2872-L2889), [headless defense](../src/game/game-core.js#L582-L613).
+Headless enemies hold spawn positions. Their states are dormant, awake outside attack range, waiting on an attack timer, hitting or having the hit absorbed, and dead. The headless Warden uses that same timer model with its own stats. [Browser AI and attacks](../src/main.js#L3083-L3334), [combat frame and culling](../src/main.js#L3671-L3688), [death and loot](../src/main.js#L2891-L2908), [headless defense](../src/game/game-core.js#L582-L613).
 
 ### Headless time, checkpoints and walkthrough
 
@@ -265,13 +270,13 @@ Headless enemies hold spawn positions. Their states are dormant, awake outside a
 | Ready, fresh town session, diagnostics idle | Invoke `__cryptRun(instant)` with `?e2e` | Claim the diagnostic, reset sample buffers and flags, then approach Rowan or enter the crypt directly |
 | Profile running | Set a waypoint and poll every 50 ms | Auto-walk consumes the target with `?e2e`. Arrival continues the route. A 20 s timeout rejects the step |
 | Profile running | Success or exception | Save the error on failure. Stop profiling, set done, clear the target and release ownership |
-| Ready, fresh town session, diagnostics idle | Click fast checkpoint | Claim the diagnostic, exercise gates and chests, place at the exit, then yield across two animation frames |
+| Ready, fresh town session, diagnostics idle | Click fast checkpoint | Claim the diagnostic, exercise both directions of every gate and open the chests, then place at the exit and yield across two animation frames |
 | Fast checkpoint awaiting frames | Resume | Publish pass or fail and release ownership |
 | Any diagnostic active | Start another diagnostic | Reject or ignore the attempt without changing the active diagnostic |
 | Keyboard smoke idle | Start command | Move to Rowan, capture the baseline and clear the old result |
 | Smoke sampled | Movement, interaction, then finish | Consume the sample and report movement direction, NPC interaction and runtime errors |
 
-[Snapshot and error publication](../src/main.js#L218-L323), [profile state and finalization](../src/main.js#L3793-L3935), [target polling](../src/optimization-contracts.js#L20-L38), [fast checkpoint and smoke](../src/main.js#L3962-L4132).
+[Snapshot and error publication](../src/main.js#L221-L326), [profile state and finalization](../src/main.js#L3813-L3957), [target polling](../src/optimization-contracts.js#L20-L38), [fast checkpoint and smoke](../src/main.js#L3984-L4170).
 
 ### Presentation and resource lifecycles
 
@@ -292,7 +297,7 @@ Headless enemies hold spawn positions. Their states are dormant, awake outside a
 | Web Audio | Uninitialized or suspended | Keyboard or pointer gesture | Initialize context and noise buffer once. Request resume when suspended |
 | Web Audio | Running | Play cue | Start scheduled nodes and stop them at their deadlines. In other context states, playback is skipped |
 
-[Toast timer](../src/main.js#L415-L420), [dialogue timer](../src/main.js#L1699-L1705), [town patrol](../src/main.js#L1557-L1608), [actor clip](../src/main.js#L656-L680), [visual updates](../src/main.js#L2682-L2747), [burst release](../src/main.js#L2849-L2862), [slot pool](../src/optimization-contracts.js#L40-L46), [adaptive resolution](../src/main.js#L920-L959), [audio](../src/audio.js#L5-L49).
+[Toast timer](../src/main.js#L433-L438), [dialogue timer](../src/main.js#L1720-L1726), [town patrol](../src/main.js#L1575-L1626), [actor clip](../src/main.js#L674-L698), [visual updates](../src/main.js#L2700-L2765), [burst release](../src/main.js#L2868-L2881), [slot pool](../src/optimization-contracts.js#L40-L46), [adaptive resolution](../src/main.js#L938-L977), [audio](../src/audio.js#L5-L49).
 
 ## Verification and limits
 

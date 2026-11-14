@@ -123,9 +123,14 @@ test('switching gates reveals only the chosen room and closes after full entry',
   assert.equal(core.moveTo(18.6, 9).ok, true);
   assert.equal(core.describe().room, 'hub');
   assert.equal(core.describe().gates.find((gate) => gate.corridorId === 'east-corridor').open, true);
-  assert.equal(core.moveTo(20, 9).ok, true);
+  // The player can move alongside the destination wall beyond the corridor's edge.
+  assert.equal(core.moveTo(18.99, 8).ok, true);
+  assert.equal(core.moveTo(core.describe().player.x, 14.1).ok, true);
+  assert.equal(core.describe().room, 'hub');
+  assert.equal(core.openGate('west-corridor').code, 'crossing');
+  assert.equal(core.moveTo(20, 14.1).ok, true);
   assert.equal(core.describe().room, 'eastGate');
-  assert.equal(core.describe().gates.find((gate) => gate.corridorId === 'east-corridor').open, false);
+  assert.equal(core.describe().gates.some((gate) => gate.open), false);
 });
 
 test('the Keep gate needs an Archive key that can be acquired before entering', () => {
