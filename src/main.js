@@ -22,9 +22,11 @@ import { initAudio, playSfx } from './audio.js';
 import { WORLD_DATA } from './world-data.js';
 import { ROOM_DECORATIONS } from './game/room-decorations.js';
 import {
+  DUNGEON_ENTRANCE,
   EXIT_POSITION,
   HEAL_FRACTION,
   INTERACT_RADII,
+  ROOM_ENTRY_CLEARANCE,
   applyChestRewards,
   applyGateOpen,
   attackDamage,
@@ -33,6 +35,11 @@ import {
   evaluateGateOpen,
   findRoomAt,
   findZoneAt,
+  gateCrossing,
+  gateTravelsAlongZ,
+  gateWallPosition,
+  hasBranchSeals,
+  isArchiveGuardian,
   isRunVictory,
   lootItemForProfile,
   playerDamage as computePlayerDamage,
@@ -90,7 +97,6 @@ const RESOLUTION_STEP_DOWN = 0.1;
 const RESOLUTION_STEP_UP = 0.05;
 const RESOLUTION_CHANGE_COOLDOWN = 1.5;
 const MAX_BLOB_SHADOWS = 64;
-const ROOM_ENTRY_CLEARANCE = 1.1;
 const DISTANT_ANIMATION_INTERVAL = 0.1;
 const FULL_ANIMATION_DISTANCE_SQ = 30 ** 2;
 const ENEMY_SIMULATION_DISTANCE_SQ = 18 ** 2;
@@ -184,6 +190,8 @@ const state = {
   lastInteraction: null,
 };
 
+const isRunActive = () => state.loaded && !state.finished && !state.failed;
+
 const keys = new Set();
 const assets = new Map();
 const enemies = [];
@@ -208,6 +216,8 @@ const navigation = createNavigationContext({
   townStaticColliders,
 });
 const e2eState = {
+  activeDiagnostic: null,
+  routeUsed: false,
   errors: [],
   smoke: null,
   lastResult: null,
@@ -331,34 +341,39 @@ function rendererPixelRatio() {
   return baseRatio * state.resolutionScale;
 }
 
-const renderer = new THREE.WebGLRenderer({
-  canvas,
-  antialias: true,
-  powerPreference: 'high-performance',
-});
-renderer.setPixelRatio(rendererPixelRatio());
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = false;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.18;
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.enablePan = false;
-controls.minDistance = 7;
-controls.maxDistance = 32;
-controls.minPolarAngle = THREE.MathUtils.degToRad(32);
-controls.maxPolarAngle = THREE.MathUtils.degToRad(78);
-controls.target.set(0, 0.8, 0);
-controls.update();
-
+let renderer;
+let controls;
 const loader = new GLTFLoader();
-const ktx2Loader = new KTX2Loader().setTranscoderPath('/basis/');
-ktx2Loader.detectSupport(renderer);
-loader.setKTX2Loader(ktx2Loader);
-loader.setMeshoptDecoder(MeshoptDecoder);
+
+function initializeRenderer() {
+  renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    powerPreference: 'high-performance',
+  });
+  renderer.setPixelRatio(rendererPixelRatio());
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = false;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.18;
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.enablePan = false;
+  controls.minDistance = 7;
+  controls.maxDistance = 32;
+  controls.minPolarAngle = THREE.MathUtils.degToRad(32);
+  controls.maxPolarAngle = THREE.MathUtils.degToRad(78);
+  controls.target.set(0, 0.8, 0);
+  controls.update();
+
+  const ktx2Loader = new KTX2Loader().setTranscoderPath('/basis/');
+  ktx2Loader.detectSupport(renderer);
+  loader.setKTX2Loader(ktx2Loader);
+  loader.setMeshoptDecoder(MeshoptDecoder);
+}
 
 const clock = new THREE.Clock();
 const tempVector = new THREE.Vector3();
@@ -376,6 +391,7 @@ const worldUp = new THREE.Vector3(0, 1, 0);
 
 let player;
 let toastTimeout;
+let trailTimeout;
 let pointerPress = null;
 let selectedTarget = null;
 let moonLight = null;
@@ -588,7 +604,6 @@ class Actor {
     this.currentClipName = '';
     this.attackLock = 0;
     this.attackTimer = 0;
-    this.attackPending = false;
     this.attackCooldown = 0;
     this.pendingAction = null;
     this.pendingEnemyAttack = null;
@@ -1318,24 +1333,9 @@ function buildChests() {
   state.openedChests = 0;
 }
 
-function gateWallPosition(corridor, roomId, travelsAlongZ) {
-  const corridorX = (corridor.minX + corridor.maxX) / 2;
-  const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
-  const room = ZONE_BY_ID.get(roomId);
-  const center = roomCenter(room);
-  return {
-    x: travelsAlongZ
-      ? corridorX
-      : center.x < corridorX ? room.maxX : room.minX,
-    z: travelsAlongZ
-      ? center.z < corridorZ ? room.maxZ : room.minZ
-      : corridorZ,
-  };
-}
-
 function moveGateAssemblyToRoom(gate, roomId) {
   const corridor = ZONE_BY_ID.get(gate.corridorId);
-  const nextPosition = gateWallPosition(corridor, roomId, gate.travelsAlongZ);
+  const nextPosition = gateWallPosition(corridor, ZONE_BY_ID.get(roomId), gate.travelsAlongZ);
   const offsetX = nextPosition.x - gate.position.x;
   const offsetZ = nextPosition.z - gate.position.z;
   if (Math.abs(offsetX) + Math.abs(offsetZ) < 0.001) return;
@@ -1350,7 +1350,7 @@ function setGateWallFrameVisible(gate, roomId, visible) {
 }
 
 function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth }) {
-  const { x, z } = gateWallPosition(corridor, roomId, travelsAlongZ);
+  const { x, z } = gateWallPosition(corridor, ZONE_BY_ID.get(roomId), travelsAlongZ);
   const wallThickness = 0.5;
   const parent = zoneRenderGroups.get(corridor.id);
   const wallRoots = [];
@@ -1398,7 +1398,7 @@ function buildGateWallFrame({ corridor, roomId, travelsAlongZ, openingWidth }) {
 function buildGateCorridorWalls({ corridor, roomIds, travelsAlongZ, openingWidth }) {
   const corridorX = (corridor.minX + corridor.maxX) / 2;
   const corridorZ = (corridor.minZ + corridor.maxZ) / 2;
-  const endpointPositions = roomIds.map((roomId) => gateWallPosition(corridor, roomId, travelsAlongZ));
+  const endpointPositions = roomIds.map((roomId) => gateWallPosition(corridor, ZONE_BY_ID.get(roomId), travelsAlongZ));
   const wallThickness = 0.5;
   const parent = zoneRenderGroups.get(corridor.id);
   const wallRoots = [];
@@ -1456,12 +1456,11 @@ function buildGates() {
     }
     const width = corridor.maxX - corridor.minX;
     const depth = corridor.maxZ - corridor.minZ;
-    const connectedRoomCenters = roomIds.map((id) => roomCenter(ZONE_BY_ID.get(id)));
-    const travelsAlongZ = Math.abs(connectedRoomCenters[1].z - connectedRoomCenters[0].z)
-      > Math.abs(connectedRoomCenters[1].x - connectedRoomCenters[0].x);
+    const [firstRoom, secondRoom] = roomIds.map((id) => ZONE_BY_ID.get(id));
+    const travelsAlongZ = gateTravelsAlongZ(firstRoom, secondRoom);
     // MAP room order follows progression, so mount the gate on the wall of the
     // first connected room until the player opens it.
-    const { x, z } = gateWallPosition(corridor, roomIds[0], travelsAlongZ);
+    const { x, z } = gateWallPosition(corridor, firstRoom, travelsAlongZ);
     const span = travelsAlongZ ? width : depth;
     const openingWidth = Math.min(3.6, span - 1.2);
     const parent = zoneRenderGroups.get(corridor.id);
@@ -1731,7 +1730,8 @@ function nearestTownNpc(maxDistance = Infinity) {
 }
 
 function enterDungeon() {
-  if (state.mode === 'dungeon' || !player) return;
+  if (!isRunActive() || state.mode === 'dungeon') return;
+  window.clearTimeout(trailTimeout);
   state.mode = 'dungeon';
   state.teleporting = false;
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
@@ -1741,11 +1741,11 @@ function enterDungeon() {
   state.combatStarted = false;
   player.root.removeFromParent();
   scene.add(player.root);
-  player.root.position.set(0, 0, 26.8);
+  player.root.position.set(DUNGEON_ENTRANCE.x, 0, DUNGEON_ENTRANCE.z);
   player.root.rotation.y = 0;
   player.setWeaponSheathed(true);
   state.currentRoomId = 'entrance';
-  state.currentZoneId = null;
+  state.currentZoneId = 'entrance';
   state.discoveredRooms = new Set(['entrance']);
   visibleZoneIds.clear();
   updateZoneVisibility('entrance', true);
@@ -1765,7 +1765,7 @@ function talkToTownNpc(npc) {
     state.teleporting = true;
     showDialogue(npc.name, 'The old bell has started ringing below the hill. Follow my mark into the crypt.', 1500);
     setToast('The hunter opens a trail beneath Ravenrest…', 1500);
-    window.setTimeout(enterDungeon, 900);
+    trailTimeout = window.setTimeout(enterDungeon, 900);
     return;
   }
   showDialogue(npc.name, npc.role === 'Town guard'
@@ -1773,12 +1773,12 @@ function talkToTownNpc(npc) {
     : 'Fresh tools, fresh trouble. Rowan is the one to ask about the dungeon.', 2600);
 }
 
-function livingEnemiesInBranch(branch, { includeWarden = true } = {}) {
-  return enemies.filter((enemy) => (
-    !enemy.dead
-    && ROOM_BRANCH[enemy.roomId] === branch
-    && (includeWarden || enemy.profileKey !== 'warden')
-  ));
+function livingEnemiesInBranch(branch) {
+  return enemies.filter((enemy) => !enemy.dead && ROOM_BRANCH[enemy.roomId] === branch);
+}
+
+function archiveGuardianCount() {
+  return enemies.filter((enemy) => !enemy.dead && isArchiveGuardian(enemy, ROOM_BRANCH)).length;
 }
 
 function livingEnemiesInRoom(roomId) {
@@ -1789,11 +1789,26 @@ function isEnemyAccessible(enemy) {
   return visibleZoneIds.has(enemy.roomId);
 }
 
+function returnCrossingGuardians(gate, roomId) {
+  const coordinate = gate.travelsAlongZ ? 'z' : 'x';
+  const wall = gate.position[coordinate];
+  const center = roomCenter(ZONE_BY_ID.get(roomId))[coordinate];
+  const inside = Math.sign(center - wall);
+  for (const enemy of livingEnemiesInRoom(roomId)) {
+    if ((enemy.root.position[coordinate] - wall) * inside >= ROOM_ENTRY_CLEARANCE) continue;
+    enemy.root.position.copy(enemy.spawnPosition);
+    enemy.evading = false;
+    enemy.awake = false;
+    enemy.attackLock = 0;
+    enemy.attackCooldown = 1;
+    enemy.pendingEnemyAttack = null;
+    enemy.play(['idle_combat', 'idle'], { force: true });
+  }
+}
+
 function updateProgression() {
   const zone = zoneAtPosition(player.root.position);
-  if (zone && zone.id !== state.currentZoneId) {
-    state.currentZoneId = zone.id;
-  }
+  state.currentZoneId = zone?.id ?? null;
   // Keep the gate open until the entire actor has cleared its collider rather
   // than closing on the first frame their center crosses the room boundary.
   // The enter/close decision itself lives in world-rules.resolveRoomEntry so
@@ -1813,6 +1828,7 @@ function updateProgression() {
   const traversedGate = transition.traversedGate;
   if (traversedGate) {
     if (E2E_ENABLED) e2eState.fastGateTransitions += 1;
+    returnCrossingGuardians(traversedGate, transition.roomId);
     traversedGate.open = false;
     traversedGate.root.visible = true;
     setGateWallFrameVisible(traversedGate, state.currentRoomId, true);
@@ -1833,7 +1849,9 @@ function updateProgression() {
 
 function runObjectivesComplete() {
   return evaluateObjectivesComplete({
-    wardenSpoilsOpened: Boolean(chestById('warden-spoils')?.opened),
+    seals: state.seals,
+    archiveKey: state.archiveKey,
+    wardenSpoilsOpened: chestById('warden-spoils')?.opened,
     livingEnemyCount: countLivingEnemies(),
   });
 }
@@ -1905,7 +1923,7 @@ function clearSelectedTarget({ silent = false } = {}) {
 }
 
 function selectTarget(target) {
-  if (!state.loaded || state.finished || state.failed) return;
+  if (!isRunActive() || state.mode !== 'dungeon') return;
   if (!target || target.dead || (target !== player && !isEnemyAccessible(target))) {
     clearSelectedTarget({ silent: true });
     return;
@@ -2050,7 +2068,7 @@ function updateInventoryUi() {
 function useInventorySlot(index) {
   const itemId = state.inventory[index];
   const item = itemId ? ITEM_DEFS[itemId] : null;
-  if (!item || state.finished || state.failed) return;
+  if (!item || !isRunActive() || state.mode !== 'dungeon') return;
   initAudio();
   if (item.kind === 'consumable') {
     if (state.playerHp >= state.playerMaxHp) {
@@ -2170,7 +2188,7 @@ function nearestClosedChest(maxDistance = Infinity) {
   let nearest = null;
   let nearestDistance = maxDistance;
   for (const chest of state.chests) {
-    if (chest.opened) continue;
+    if (chest.opened || !visibleZoneIds.has(chest.roomId)) continue;
     const distance = player.root.position.distanceTo(chest.position);
     if (distance < nearestDistance) {
       nearest = chest;
@@ -2184,7 +2202,7 @@ function nearestClosedGate(maxDistance = Infinity) {
   let nearest = null;
   let nearestDistance = maxDistance;
   for (const gate of state.gates) {
-    if (gate.open || !zoneRenderGroups.get(gate.corridorId)?.visible) continue;
+    if (gate.open || !gate.roomIds.includes(state.currentRoomId)) continue;
     const distance = player.root.position.distanceTo(gate.position);
     if (distance < nearestDistance) {
       nearest = gate;
@@ -2199,19 +2217,31 @@ function findGate(corridorId) {
 }
 
 function clearEnemies(filter = () => true) {
+  if (!isRunActive() || state.mode !== 'dungeon') return;
   for (const enemy of enemies) {
-    if (!filter(enemy)) continue;
+    if (enemy.dead || !filter(enemy)) continue;
+    enemy.hp = 0;
     enemy.dead = true;
+    enemy.pendingEnemyAttack = null;
     enemy.root.visible = false;
   }
 }
 
-function openGate(gate) {
-  const verdict = evaluateGateOpen({
+function gateOpenVerdict(gate) {
+  const { x, z } = player.root.position;
+  return evaluateGateOpen({
     gate,
     currentRoomId: state.currentRoomId,
     livingInRoomCount: livingEnemiesInRoom(state.currentRoomId).length,
+    crossing: gateCrossing({ x, z, room: ZONE_BY_ID.get(state.currentRoomId), gates: state.gates, zoneById: ZONE_BY_ID }),
+    seals: state.seals,
+    archiveKey: state.archiveKey,
   });
+}
+
+function openGate(gate) {
+  if (!isRunActive() || state.mode !== 'dungeon') return;
+  const verdict = gateOpenVerdict(gate);
   if (!verdict.ok) {
     if (verdict.message) setToast(verdict.message, 1800);
     return;
@@ -2257,7 +2287,7 @@ const OBJECTIVE_LADDER = [
     detail: () => 'Clear the western and eastern branches to claim their seals.',
   },
   {
-    when: () => !state.seals.west || !state.seals.east,
+    when: () => !hasBranchSeals(state.seals),
     title: 'Claim the twin branch seals',
     detail: () => {
       const west = state.seals.west ? 'seal claimed' : `${livingEnemiesInBranch('west').length} guardians`;
@@ -2266,9 +2296,9 @@ const OBJECTIVE_LADDER = [
     },
   },
   {
-    when: () => livingEnemiesInBranch('north', { includeWarden: false }).length > 0,
+    when: () => !state.archiveKey && archiveGuardianCount() > 0,
     title: 'Cross the Silent Archive',
-    detail: () => `${livingEnemiesInBranch('north', { includeWarden: false }).length} northern guardians stand between you and the Archive key.`,
+    detail: () => `${archiveGuardianCount()} northern guardians stand between you and the Archive key.`,
   },
   {
     when: () => !state.archiveKey,
@@ -2306,19 +2336,19 @@ function updateQuestUi() {
   objectiveDetail.textContent = stage.detail();
 }
 
-// One nearest-of-four scan shared by the interaction prompt and the E key
-// handler. Priority order matches the headless core: loot, chest, gate.
+// The prompt and E key use the same interaction priority.
 function interactionCandidate() {
-  const candidates = [
-    { kind: 'loot', item: nearestLootDrop(INTERACT_RADII.loot), id: (drop) => drop.itemId },
-    { kind: 'chest', item: nearestClosedChest(INTERACT_RADII.chest), id: (chest) => chest.id },
-    { kind: 'gate', item: nearestClosedGate(INTERACT_RADII.gate), id: (gate) => gate.corridorId },
-  ];
-  return candidates.find((candidate) => candidate.item) ?? null;
+  const loot = nearestLootDrop(INTERACT_RADII.loot);
+  if (loot && state.inventory.includes(null)) return { kind: 'loot', item: loot };
+  const chest = nearestClosedChest(INTERACT_RADII.chest);
+  if (chest && (!loot || !chestBlockReason(chest))) return { kind: 'chest', item: chest };
+  const gate = nearestClosedGate(INTERACT_RADII.gate);
+  if (gate && (!loot || gateOpenVerdict(gate).ok)) return { kind: 'gate', item: gate };
+  return loot ? { kind: 'loot', item: loot } : null;
 }
 
 function updateInteractionUi() {
-  if (!state.loaded || state.finished || state.failed) {
+  if (!isRunActive()) {
     interaction.classList.add('is-hidden');
     return;
   }
@@ -2342,16 +2372,23 @@ function updateInteractionUi() {
   }
   interaction.classList.remove('is-hidden');
   if (candidate.kind === 'loot') {
-    interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[candidate.item.itemId].name.toLowerCase()}`;
+    if (state.inventory.includes(null)) {
+      interaction.innerHTML = `Press <kbd>E</kbd> to collect ${ITEM_DEFS[candidate.item.itemId].name.toLowerCase()}`;
+    } else {
+      interaction.textContent = 'Backpack full';
+    }
   } else if (candidate.kind === 'chest') {
     interaction.innerHTML = `Press <kbd>E</kbd> to open ${candidate.item.name.toLowerCase()}`;
   } else {
+    const verdict = gateOpenVerdict(candidate.item);
+    if (!verdict.ok) {
+      interaction.classList.toggle('is-hidden', !verdict.message);
+      interaction.textContent = verdict.message;
+      return;
+    }
     const destinationId = candidate.item.roomIds.find((id) => id !== state.currentRoomId);
     const destination = ZONE_BY_ID.get(destinationId);
-    const remainingEnemies = livingEnemiesInRoom(state.currentRoomId).length;
-    interaction.innerHTML = remainingEnemies > 0
-      ? `Gate sealed by ${remainingEnemies} remaining guardian${remainingEnemies === 1 ? '' : 's'}`
-      : `Press <kbd>E</kbd> to open the way to ${(destination?.label ?? 'the next chamber').toLowerCase()}`;
+    interaction.innerHTML = `Press <kbd>E</kbd> to open the way to ${(destination?.label ?? 'the next chamber').toLowerCase()}`;
   }
 }
 
@@ -2631,7 +2668,6 @@ function updateSpellProjectiles(delta) {
         if (projectile.action === 'freeze') {
           const damage = playerDamage(attackDamage('freeze', target.profileKey), 'freeze');
           target.frozenTimer = target.profileKey === 'warden' ? 3.5 : 6;
-          target.attackPending = false;
           target.pendingEnemyAttack = null;
           applyEnemyDamage(target, damage, 0x8dcdf3, `${target.name} freezes solid.`);
           spawnCombatText(target.root.position, 'FROZEN', '#bfe7fa', target.height + 0.55);
@@ -2774,7 +2810,7 @@ function updateTownNpcNameplates() {
   }
 }
 
-function spawnTelegraph({ position, radius, duration, color = 0xd96d63, attack = null, onResolve }) {
+function spawnTelegraph({ position, radius, duration, color, enemy, attack, onResolve }) {
   const material = new THREE.MeshBasicMaterial({
     color,
     transparent: true,
@@ -2787,25 +2823,27 @@ function spawnTelegraph({ position, radius, duration, color = 0xd96d63, attack =
   disc.position.copy(position);
   disc.position.y = 0.045;
   scene.add(disc);
-  telegraphs.push({ disc, material, life: duration, duration, radius, attack, onResolve });
+  telegraphs.push({ disc, material, life: duration, duration, enemy, attack, onResolve });
 }
 
 function updateTelegraphs(delta) {
   for (let index = telegraphs.length - 1; index >= 0; index -= 1) {
     const telegraph = telegraphs[index];
+    const canceled = telegraph.enemy.dead || telegraph.enemy.frozenTimer > 0
+      || telegraph.enemy.pendingEnemyAttack !== telegraph.attack;
     telegraph.life -= delta;
-    if (telegraph.attack) telegraph.attack.castRemaining = Math.max(0, telegraph.life);
+    if (canceled || telegraph.life <= 0) {
+      disposeVisual(telegraph.disc);
+      telegraphs.splice(index, 1);
+      if (!canceled) telegraph.onResolve();
+      if (!isRunActive()) return;
+      continue;
+    }
+    telegraph.attack.castRemaining = telegraph.life;
     const progress = 1 - Math.max(0, telegraph.life / telegraph.duration);
     const pulse = 0.92 + Math.sin(progress * Math.PI * 8) * 0.035;
     telegraph.disc.scale.setScalar(pulse);
     telegraph.material.opacity = 0.13 + progress * 0.32;
-    if (telegraph.life <= 0) {
-      scene.remove(telegraph.disc);
-      telegraph.disc.geometry.dispose();
-      telegraph.material.dispose();
-      telegraphs.splice(index, 1);
-      telegraph.onResolve?.();
-    }
   }
 }
 
@@ -2895,7 +2933,7 @@ function applySelfAction(action) {
 }
 
 function useAction(action, target = selectedTarget) {
-  if (!state.loaded || state.finished || state.failed) return;
+  if (!isRunActive() || state.mode !== 'dungeon') return;
   const actionDef = ACTIONS[action];
   if (!actionDef) return;
   const selfAction = action === 'heal' || action === 'buff';
@@ -2945,6 +2983,7 @@ function useAction(action, target = selectedTarget) {
 }
 
 function attemptAttack() {
+  if (!isRunActive() || state.mode !== 'dungeon') return;
   const target = selectedTarget && selectedTarget !== player && !selectedTarget.dead ? selectedTarget : null;
   if (!target) {
     state.started = true;
@@ -3036,7 +3075,6 @@ function moveEnemy(enemy, direction, speed, delta) {
 function startEnemyEvade(enemy) {
   enemy.evading = true;
   enemy.awake = false;
-  enemy.attackPending = false;
   enemy.pendingEnemyAttack = null;
   enemy.attackLock = 0;
   spawnCombatText(enemy.root.position, 'RESET', '#c7bdce', enemy.height + 0.2);
@@ -3098,13 +3136,14 @@ function startGroundAttack(enemy, profile, { wardenSlam = false, phaseTwo = fals
     radius,
     duration: castDuration,
     color: soulCollapse ? 0x9a5ec1 : wardenSlam ? 0xc44743 : profile.kind === 'support' ? 0x9a69cf : 0xd57a62,
+    enemy,
     attack,
     onResolve: () => {
-      if (enemy.dead || enemy.frozenTimer > 0 || enemy.pendingEnemyAttack !== attack) return;
       enemy.pendingEnemyAttack = null;
-      spawnBurst(position, soulCollapse ? 0xb978da : wardenSlam ? 0xe06252 : 0xb07bd3, soulCollapse ? 22 : wardenSlam ? 28 : 16);
       if (player.root.position.distanceTo(position) <= radius) damagePlayer(damage, enemy.name);
       else spawnCombatText(player.root.position, 'DODGED', '#a9d8ef', player.height + 0.2);
+      if (!isRunActive()) return;
+      spawnBurst(position, soulCollapse ? 0xb978da : wardenSlam ? 0xe06252 : 0xb07bd3, soulCollapse ? 22 : wardenSlam ? 28 : 16);
       if (soulCollapse) playSfx('warden-collapse');
     },
   });
@@ -3227,7 +3266,6 @@ function updateEnemy(enemy, delta) {
     return;
   }
   if (enemy.frozenTimer > 0) {
-    enemy.attackPending = false;
     enemy.pendingEnemyAttack = null;
     enemy.face(player.root.position);
     enemy.play(['idle_combat', 'idle']);
@@ -3445,8 +3483,8 @@ function openChest(chest) {
     spawnCombatText(chest.position, 'ARCHIVE KEY', '#c9b2f0', 1.8);
     setToast('The Archive key hums toward the Warden\'s Keep.', 2400);
   } else if (chest.kind === 'final') {
-    spawnCombatText(chest.position, 'WARDEN RELIC', '#f2cf7c', 1.8);
-    setToast('The Warden relic completes the delve. Return to the entrance.', 2400);
+    spawnCombatText(chest.position, 'WARDEN’S SPOILS', '#f2cf7c', 1.8);
+    setToast('The Warden’s spoils are yours. Return to the entrance.', 2400);
   } else {
     spawnCombatText(chest.position, 'RENEWED', '#9fe1bb', 1.8);
     setToast(`${chest.name} restores vitality and hastens your abilities.`);
@@ -3457,7 +3495,7 @@ function openChest(chest) {
 }
 
 function interact() {
-  if (!state.loaded || state.finished || state.failed) return;
+  if (!isRunActive()) return;
   if (state.mode === 'town') {
     const nearbyNpc = nearestTownNpc(INTERACT_RADII.npc);
     if (nearbyNpc && !state.teleporting) {
@@ -3489,7 +3527,25 @@ function finishRun(success) {
   if (state.finished || state.failed) return;
   state.finished = success;
   state.failed = !success;
+  clearInputState();
+  controls.enabled = false;
+  state.playerBuffTimer = 0;
+  player.pendingAction = null;
+  player.attackTarget = null;
+  player.attackTimer = 0;
+  for (const enemy of enemies) {
+    enemy.pendingEnemyAttack = null;
+    enemy.nameplate?.element.classList.add('is-hidden');
+  }
+  for (const projectile of spellProjectiles.splice(0)) disposeVisual(projectile.root);
+  for (const visual of spellVisuals.splice(0)) disposeVisual(visual.root);
+  for (const telegraph of telegraphs.splice(0)) disposeVisual(telegraph.disc);
   clearWardVisual();
+  for (const effect of effects.splice(0)) {
+    effect.mesh.visible = false;
+    burstMeshPool.release(effect.mesh);
+  }
+  for (const text of combatTexts.splice(0)) text.element.remove();
   if (success) {
     endEyebrow.textContent = 'CRYPT CLEARED';
     endTitle.textContent = 'The path is clear.';
@@ -3502,9 +3558,11 @@ function finishRun(success) {
   endScreen.classList.remove('is-hidden');
   targetCard.classList.add('is-hidden');
   interaction.classList.add('is-hidden');
-  for (const enemy of enemies) enemy.nameplate?.element.classList.add('is-hidden');
   clearSelectedTarget({ silent: true });
+  updateHealthUi();
   updateQuestUi();
+  restartButton.focus({ preventScroll: true });
+  publishE2eSnapshot(true);
 }
 
 function resetRun() {
@@ -3524,12 +3582,16 @@ async function loadAssets() {
 }
 
 function onKeyDown(event) {
+  if (!isRunActive()) return;
+  const target = event.target;
+  if (target instanceof Element) {
+    if (target.closest('input, textarea, select, [contenteditable]')) return;
+    if (event.code === 'Space' && target.closest('button, a[href], [role="button"]')) return;
+  }
   initAudio();
-  const activeTag = document.activeElement?.tagName?.toLowerCase();
-  if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
   const action = ACTION_BY_KEY.get(event.code);
-  if (action && !event.repeat) {
-    useAction(action);
+  if (action && state.mode === 'dungeon') {
+    if (!event.repeat) useAction(action);
     event.preventDefault();
     return;
   }
@@ -3541,15 +3603,21 @@ function onKeyDown(event) {
     event.preventDefault();
   }
   if (key === 'e' && !event.repeat) interact();
+  if (state.mode !== 'dungeon') return;
   if (key === 'escape' && !event.repeat) clearSelectedTarget();
-  if (event.code === 'Space' && !event.repeat) {
-    attemptAttack();
+  if (event.code === 'Space') {
+    if (!event.repeat) attemptAttack();
     event.preventDefault();
   }
 }
 
 function onKeyUp(event) {
   keys.delete(event.key.toLowerCase());
+}
+
+function clearInputState() {
+  keys.clear();
+  pointerPress = null;
 }
 
 function updateTownActors(delta) {
@@ -3567,7 +3635,7 @@ function animate() {
   const frameDelta = clock.getDelta();
   updateAdaptiveQuality(frameDelta);
   const delta = Math.min(frameDelta, 0.05);
-  if (state.loaded && !state.finished && !state.failed) {
+  if (isRunActive()) {
     state.elapsed += delta;
     state.playerBuffTimer = Math.max(0, state.playerBuffTimer - delta);
     for (const action of Object.keys(state.actionCooldowns)) {
@@ -3585,6 +3653,7 @@ function animate() {
         finishRun(true);
       }
       for (const enemy of enemies) {
+        if (!isRunActive()) break;
         if (enemy.dead && !enemy.root.visible) continue;
         const distanceSq = player.root.position.distanceToSquared(enemy.root.position);
         const roomVisible = visibleZoneIds.has(enemy.roomId);
@@ -3600,16 +3669,20 @@ function animate() {
         if (!enemy.awake && !enemy.evading && distanceSq > ENEMY_SIMULATION_DISTANCE_SQ) continue;
         updateEnemy(enemy, delta);
       }
-      updateEffects(delta);
-      updateSpellProjectiles(delta);
-      updateSpellVisuals(delta);
-      updateWardVisual(delta);
-      updateLootDrops(delta);
-      updateTelegraphs(delta);
-      updateCombatTexts(delta);
+      if (isRunActive()) {
+        updateEffects(delta);
+        updateSpellProjectiles(delta);
+        updateSpellVisuals(delta);
+        updateWardVisual(delta);
+        updateLootDrops(delta);
+        updateTelegraphs(delta);
+        if (isRunActive()) updateCombatTexts(delta);
+      }
     } else {
       updateTownActors(delta);
     }
+  }
+  if (isRunActive()) {
     updateBlobShadows();
     updateCamera(delta);
     state.overlayTimer -= delta;
@@ -3639,30 +3712,42 @@ function animate() {
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(rendererPixelRatio());
+  renderer?.setSize(window.innerWidth, window.innerHeight);
+  renderer?.setPixelRatio(rendererPixelRatio());
 });
 window.addEventListener('keydown', onKeyDown, { passive: false });
 window.addEventListener('keyup', onKeyUp);
+window.addEventListener('blur', clearInputState);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearInputState();
+});
 canvas.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
+  if (!isRunActive() || event.button !== 0) return;
   initAudio();
-  pointerPress = { x: event.clientX, y: event.clientY, time: performance.now() };
+  if (state.mode !== 'dungeon' || pointerPress) return;
+  pointerPress = { id: event.pointerId, x: event.clientX, y: event.clientY, time: performance.now() };
 });
 canvas.addEventListener('pointerup', (event) => {
-  if (event.button !== 0 || !pointerPress) return;
+  if (pointerPress?.id !== event.pointerId) return;
   const distance = Math.hypot(event.clientX - pointerPress.x, event.clientY - pointerPress.y);
   const duration = performance.now() - pointerPress.time;
   pointerPress = null;
-  if (distance < 8 && duration < 500) {
+  if (event.button === 0 && distance < 8 && duration < 500) {
     const target = pickActor(event.clientX, event.clientY);
     if (target) selectTarget(target);
     else clearSelectedTarget();
   }
 });
-canvas.addEventListener('pointercancel', () => {
-  pointerPress = null;
-});
+function cancelPointerPress(event) {
+  const press = pointerPress;
+  if (press?.id !== event.pointerId) return;
+  // OrbitControls releases capture in its pointerup handler.
+  if (event.type === 'lostpointercapture') {
+    queueMicrotask(() => { if (pointerPress === press) pointerPress = null; });
+  } else pointerPress = null;
+}
+canvas.addEventListener('pointercancel', cancelPointerPress);
+canvas.addEventListener('lostpointercapture', cancelPointerPress);
 abilitySlots.forEach((button) => {
   button.addEventListener('click', () => useAction(button.dataset.ability));
 });
@@ -3673,6 +3758,15 @@ restartButton.addEventListener('click', resetRun);
 
 async function start() {
   try {
+    initializeRenderer();
+  } catch (error) {
+    console.error(error);
+    loadingLabel.textContent = 'WebGL 2 could not start. Check your browser’s graphics settings and reload.';
+    loadingFill.style.background = '#b5656b';
+    return;
+  }
+  try {
+    animate();
     await loadAssets();
     buildWorld();
     setLoading(0.98, 'Settling the shadows');
@@ -3695,7 +3789,6 @@ async function start() {
   }
 }
 
-animate();
 start();
 
 // --- Profiling instrumentation (opt in through __cryptRun) ---
@@ -3707,7 +3800,21 @@ window.__cryptMark = (label) => {
   if (profile?.active) profile.marks.push({ t: performance.now(), label });
 };
 
+function diagnosticBlockReason() {
+  if (!E2E_ENABLED) return 'Open the game with ?e2e to run diagnostics.';
+  if (!state.loaded) return 'Wait for the game to finish loading.';
+  if (e2eState.activeDiagnostic) return 'Another diagnostic is already running.';
+  if (e2eState.routeUsed || state.mode !== 'town' || state.teleporting) {
+    return 'Reload the page to start a diagnostic from town.';
+  }
+  return '';
+}
+
 window.__cryptRun = async (instant = false) => {
+  const blocked = diagnosticBlockReason();
+  if (blocked) throw new Error(blocked);
+  e2eState.activeDiagnostic = 'profile';
+  e2eState.routeUsed = true;
   const profile = window.__cryptProfile ??= createCryptProfile();
   profile.frames.length = 0;
   profile.zones.length = 0;
@@ -3802,6 +3909,7 @@ window.__cryptRun = async (instant = false) => {
     profile.active = false;
     window.__cryptDone = true;
     window.__cryptWalkTarget = null;
+    e2eState.activeDiagnostic = null;
   }
 };
 
@@ -3854,6 +3962,11 @@ if (E2E_ENABLED) {
     if (!chest.opened) throw new Error(`Fast route could not open ${id}.`);
   };
   const runFastCheckpoint = async () => {
+    const blocked = diagnosticBlockReason();
+    if (blocked) throw new Error(blocked);
+    e2eState.activeDiagnostic = 'fast-checkpoint';
+    e2eState.routeUsed = true;
+    setE2eResult(null);
     const startedAt = performance.now();
     e2eState.fastGateTransitions = 0;
     try {
@@ -3937,9 +4050,15 @@ if (E2E_ENABLED) {
         error: error instanceof Error ? error.message : String(error),
         snapshot: e2eSnapshot(),
       });
+    } finally {
+      e2eState.activeDiagnostic = null;
     }
   };
   const startKeyboardSmoke = () => {
+    const blocked = diagnosticBlockReason();
+    if (blocked) throw new Error(blocked);
+    e2eState.activeDiagnostic = 'keyboard-smoke';
+    clearInputState();
     const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
     if (rowan) player.root.position.copy(rowan.root.position);
     state.lastInteraction = null;
@@ -3960,11 +4079,14 @@ if (E2E_ENABLED) {
     setE2eResult(null);
   };
   const finishKeyboardSmoke = () => {
+    if (e2eState.activeDiagnostic && e2eState.activeDiagnostic !== 'keyboard-smoke') return;
     const smoke = e2eState.smoke;
     if (!smoke) {
       setE2eResult({ kind: 'keyboard-smoke', pass: false, error: 'Smoke was not started.' });
       return;
     }
+    e2eState.smoke = null;
+    e2eState.activeDiagnostic = null;
     const distance = smoke.pathDistance;
     const forwardDot = distance > 0.001 ? smoke.forwardTravel / distance : 0;
     const assertions = {
@@ -3994,9 +4116,11 @@ if (E2E_ENABLED) {
     button.type = 'button';
     button.dataset.e2eCommand = command;
     button.textContent = label;
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
+      if (e2eState.activeDiagnostic
+        && (command !== 'smoke-finish' || e2eState.activeDiagnostic !== 'keyboard-smoke')) return;
       try {
-        handler();
+        await handler();
       } catch (error) {
         setE2eResult({ kind: command, pass: false, error: error instanceof Error ? error.message : String(error), snapshot: e2eSnapshot() });
       }
@@ -4014,7 +4138,6 @@ if (E2E_ENABLED) {
     enterDungeon,
     placeAt,
     clearRoom() {
-      if (!player) throw new Error('World not built yet.');
       clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
     },
     openGateById(corridorId) {

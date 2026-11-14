@@ -24,7 +24,7 @@ export const DELVE_STEPS = [
   { type: 'openGate', corridorId: 'west-drop' },
   { type: 'moveTo', x: -47, z: -13 },
   { type: 'clearRoom', roomId: 'westOssuary' },
-  { type: 'interact', label: 'west seal' },
+  { type: 'interact', chestId: 'west-seal', label: 'west seal' },
 
   // East branch.
   { type: 'openGate', corridorId: 'west-drop' },
@@ -42,7 +42,7 @@ export const DELVE_STEPS = [
   { type: 'openGate', corridorId: 'east-drop' },
   { type: 'moveTo', x: 47, z: -12.5 },
   { type: 'clearRoom', roomId: 'eastReliquary' },
-  { type: 'interact', label: 'east seal' },
+  { type: 'interact', chestId: 'east-seal', label: 'east seal' },
 
   // North branch.
   { type: 'openGate', corridorId: 'east-drop' },
@@ -50,27 +50,22 @@ export const DELVE_STEPS = [
   { type: 'openGate', corridorId: 'east-deep-corridor' },
   { type: 'moveTo', x: 26, z: 9 },
   { type: 'openGate', corridorId: 'east-corridor' },
+  { type: 'moveTo', x: 0, z: 8 },
+  { type: 'openGate', corridorId: 'north-corridor' },
   { type: 'moveTo', x: 0, z: -8 },
   { type: 'clearRoom', roomId: 'northHall' },
   { type: 'openGate', corridorId: 'archive-corridor' },
   { type: 'moveTo', x: 0, z: -27 },
   { type: 'clearRoom', roomId: 'northLibrary' },
+  { type: 'interact', chestId: 'archive-key', label: 'archive key' },
 
-  // The archive cache stays sealed while its acolytes stand, and the keep's
-  // vanguard counts as a north-branch guardian — so the Warden falls first.
   { type: 'openGate', corridorId: 'warden-corridor' },
   { type: 'moveTo', x: 0, z: -36 },
   { type: 'kill', targetId: WARDEN_ID },
   { type: 'clearRoom', roomId: 'wardenKeep' },
 
-  // Archive key on the way back through the library, spoils in the keep.
-  { type: 'openGate', corridorId: 'warden-corridor' },
-  { type: 'moveTo', x: 0, z: -27 },
-  { type: 'interact', label: 'archive key' },
-  { type: 'openGate', corridorId: 'warden-corridor' },
-  { type: 'moveTo', x: 0, z: -40 },
   { type: 'moveTo', x: 0, z: -47.5 },
-  { type: 'interact', label: "warden's spoils" },
+  { type: 'interact', chestId: 'warden-spoils', label: "warden's spoils" },
 
   // Return to the entrance vault and finish at the southern exit.
   { type: 'openGate', corridorId: 'warden-corridor' },
@@ -81,13 +76,15 @@ export const DELVE_STEPS = [
   { type: 'moveTo', x: 0, z: 12.5 },
   { type: 'openGate', corridorId: 'entry-corridor' },
   { type: 'moveTo', x: 0, z: 31.2 },
-  { type: 'tick', delta: 0.1 },
 ];
 
 function killWithFire(core, targetId) {
   // The guard counts simulation turns (cooldown ticks included), not swings.
   let turns = 0;
-  while ((core.describe().enemies.find((enemy) => enemy.id === targetId)?.hp ?? 0) > 0) {
+  while (true) {
+    const target = core.describe().enemies.find((enemy) => enemy.id === targetId);
+    if (!target) throw new Error(`No enemy for ${targetId}.`);
+    if (target.dead) return;
     const swing = core.useAction('fire', targetId);
     if (!swing.ok && swing.reason === 'cooldown') {
       core.tick(swing.remaining);
@@ -98,9 +95,14 @@ function killWithFire(core, targetId) {
   }
 }
 
-// Executes DELVE_STEPS against a fresh-or-restored core. `onStep` receives
+// Executes DELVE_STEPS against a fresh core. `onStep` receives
 // each completed step for logging; failures throw with the step description.
 export function runDelve(core, { onStep } = {}) {
+  const initial = core.describe();
+  if (initial.mode !== 'town' || initial.interactionCount > 0 || initial.started
+    || initial.finished || initial.failed) {
+    throw new Error('The full delve requires a fresh game.');
+  }
   for (const step of DELVE_STEPS) {
     switch (step.type) {
       case 'talkTo': {
@@ -118,12 +120,17 @@ export function runDelve(core, { onStep } = {}) {
         if (!outcome.ok) throw new Error(`moveTo(${step.x}, ${step.z}): ${outcome.reason}`);
         break;
       }
-      case 'clearRoom':
-        core.clearRoom(step.roomId);
+      case 'clearRoom': {
+        const outcome = core.clearRoom(step.roomId);
+        if (!outcome.ok) throw new Error(`clearRoom ${step.roomId}: ${outcome.reason}`);
         break;
+      }
       case 'interact': {
         const outcome = core.interact();
         if (!outcome.ok) throw new Error(`${step.label ?? 'interact'}: ${outcome.reason}`);
+        if (outcome.kind !== 'chest' || outcome.chestId !== step.chestId) {
+          throw new Error(`${step.label}: expected chest ${step.chestId}, got ${outcome.chestId ?? outcome.kind}`);
+        }
         break;
       }
       case 'kill':
@@ -137,5 +144,7 @@ export function runDelve(core, { onStep } = {}) {
     }
     onStep?.(step);
   }
-  return core.describe();
+  const result = core.describe();
+  if (!result.finished) throw new Error('The delve did not finish at the exit.');
+  return result;
 }

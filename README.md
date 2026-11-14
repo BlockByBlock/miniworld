@@ -18,9 +18,9 @@ destination rendered. Chests, tombs, and columns block movement.
 An adaptive quality controller lowers or restores render resolution using
 averaged frame time; the renderer uses a single instanced blob-shadow pass for
 lightweight, consistent shadows.
-The western and eastern seals guide the northern Archive route; its key leads
-to a telegraphed Warden encounter. At half health, the Warden enters a second
-phase, accelerates, changes the crypt lighting, and casts a player-targeted
+The western and eastern seals open the northern route. Clear Catacomb Crossing
+and the Silent Archive to claim the key to the Warden's Keep. At half health,
+the Warden enters a second phase, accelerates, changes the crypt lighting, and casts a player-targeted
 Soul Collapse that must be dodged. A schematic minimap, selected-target frame,
 action-bar cooldowns, projected enemy nameplates and cast bars, combat status, and
 floating feedback keep the larger delve readable. Fire and Frostbolt use
@@ -49,13 +49,13 @@ mouse to orbit the view, and scroll to zoom. Click an
 enemy to select it, then press `1`–`5` or click the matching action-bar slot for
 `Sword`, `Fire`, `Frostbolt`, `Heal`, or `Ward`. Press `Space` to use `Sword` on
 the selected enemy, and press `Esc` or click empty ground to clear the target.
-Press `E` to open
-gates and reliquaries or collect glowing enemy drops. Gates remain sealed until
-the current room is clear; entering the revealed room closes the gate and hides
-the chamber behind. Blob shadows are always enabled while render resolution
-adapts to frame time. Click a backpack item to consume or equip it. After the
-final cache, return through the southern entrance to finish. Room caches provide small recovery and cooldown relief, while the two branch
-reliquaries, Archive cache, and Warden spoils drive the required route.
+Press `E` to open gates and reliquaries or collect glowing enemy drops. Gates
+remain sealed until the current room is clear. Entering the revealed room closes
+the gate and hides the chamber behind. Blob shadows are always enabled while
+render resolution adapts to frame time. Click a backpack item to consume or equip
+it. Once all guardians are defeated and the Warden's spoils are claimed, return
+through the southern entrance to finish. Room caches provide small recovery and
+cooldown relief.
 
 ## Build
 
@@ -75,6 +75,10 @@ Run a full New Game-to-victory delve headlessly (no browser) with `npm run test:
 The headless model omits furniture collisions and simplifies combat timing,
 enemy movement, and status effects. Completing its route verifies progression;
 use browser checks to verify rendered movement and combat.
+
+Headless time advances in 0.1-second steps. Shorter increments carry over to
+the next tick. Load checkpoints into a core using the same world. Start a fresh
+game before running the full scripted delve.
 
 See [ASSET_CREDITS.md](./ASSET_CREDITS.md) for the exact source commit and
 license record for the bundled models.
