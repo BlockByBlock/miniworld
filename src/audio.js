@@ -1,9 +1,18 @@
 // WebAudio presentation layer: a tiny synth for game sound effects.
 // Recipes live in SFX_RECIPES (data, not branches); the rest of the app only
-// ever calls initAudio() and playSfx(name).
+// ever calls initAudio(), playSfx(name), and the setMuted/isMuted toggle.
 
 let audioContext = null;
 let noiseBuffer = null;
+let muted = false;
+
+export function setMuted(value) {
+  muted = Boolean(value);
+}
+
+export function isMuted() {
+  return muted;
+}
 
 export function initAudio() {
   if (!audioContext) {
@@ -100,7 +109,7 @@ const SFX_RECIPES = {
 };
 
 export function playSfx(name) {
-  if (!audioContext || audioContext.state !== 'running') return;
+  if (muted || !audioContext || audioContext.state !== 'running') return;
   for (const recipe of SFX_RECIPES[name] ?? []) {
     if (recipe.noise) playNoise(recipe.noise);
     if (recipe.tone) playTone(recipe.tone);
