@@ -2,6 +2,9 @@
 // and applies checkpoints; this module only validates and stores them, so a
 // malformed or stale save is discarded whole rather than half-applied.
 
+import { zoneContains } from './game/world-rules.js';
+import { isFiniteNumber } from './world-data.js';
+
 export const CHECKPOINT_KEY = 'forgotten-crypt:checkpoint';
 export const CHECKPOINT_VERSION = 1;
 
@@ -13,7 +16,6 @@ export function browserStorage() {
   }
 }
 
-const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 const isBoolean = (value) => typeof value === 'boolean';
 const everyIn = (values, allowed) => Array.isArray(values) && values.every((value) => allowed.has(value));
 
@@ -25,15 +27,20 @@ export function isValidCheckpoint(value, world) {
   const spawnIds = new Set(world.enemySpawns.map((spawn) => spawn.id));
   const itemIds = new Set(Object.keys(world.items));
   const { inventory, equippedSlot } = value;
-  return roomIds.has(value.roomId)
+  const room = world.map.rooms.find((candidate) => candidate.id === value.roomId);
+  // A room-entry position outside its room (for example after the layout
+  // changed) would strand the player, so the whole save is discarded.
+  return Boolean(room)
     && isFiniteNumber(value.position?.x)
     && isFiniteNumber(value.position?.z)
+    && zoneContains(room, value.position.x, value.position.z)
     && everyIn(value.discoveredRooms, roomIds)
     && isFiniteNumber(value.playerHp)
     && value.playerHp > 0
     && Array.isArray(inventory)
     && inventory.every((itemId) => itemId === null || itemIds.has(itemId))
-    && (equippedSlot === null || world.items[inventory[equippedSlot]]?.kind === 'equipment')
+    && (equippedSlot === null
+      || (Number.isInteger(equippedSlot) && world.items[inventory[equippedSlot]]?.kind === 'equipment'))
     && isBoolean(value.seals?.west)
     && isBoolean(value.seals?.east)
     && isBoolean(value.archiveKey)

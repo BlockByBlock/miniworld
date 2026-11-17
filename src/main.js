@@ -1009,7 +1009,9 @@ function enterDungeon(checkpoint = null) {
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
   window.clearTimeout(dialogueTimeout);
   dialogueCard.classList.add('is-hidden');
-  state.started = false;
+  // A resumed run is already underway, so the HUD shows its real objective;
+  // enemies still wait for movement through combatStarted.
+  state.started = Boolean(checkpoint);
   state.combatStarted = false;
   player.root.removeFromParent();
   scene.add(player.root);
@@ -2830,11 +2832,14 @@ function setPaused(paused) {
   clearInputState();
   controls.enabled = !paused && !renderingPaused;
   pauseScreen.classList.toggle('is-hidden', !paused);
+  // Keep keyboard focus and clicks inside the modal pause screen.
+  for (const element of app.children) {
+    if (element !== pauseScreen) element.inert = paused;
+  }
   if (paused) {
     resumeButton.focus({ preventScroll: true });
     return;
   }
-  clock.getDelta();
   // Drop focus from the pause controls so Space attacks instead of re-pausing.
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   if (state.teleporting && trailTimeout === null && !renderingPaused) enterDungeon();
@@ -2858,23 +2863,32 @@ function toggleMuted() {
 async function loadAssets() {
   const entries = Object.entries(ASSETS);
   let loadedCount = 0;
+  let failed = false;
   setLoading(0.08, 'Calling the cryptwalker');
   await Promise.all(entries.map(async ([key, url]) => {
-    assets.set(key, await loader.loadAsync(url));
+    try {
+      assets.set(key, await loader.loadAsync(url));
+    } catch (error) {
+      failed = true;
+      throw error;
+    }
     loadedCount += 1;
-    setLoading(0.08 + (loadedCount / entries.length) * 0.82, `Raising the crypt (${loadedCount}/${entries.length})`);
+    // After one model fails, start() shows the error; later loads keep it.
+    if (!failed) setLoading(0.08 + (loadedCount / entries.length) * 0.82, `Raising the crypt (${loadedCount}/${entries.length})`);
   }));
   setLoading(0.96, 'Lighting the last room');
 }
 
 function onKeyDown(event) {
   const pressed = event.key.toLowerCase();
-  if (state.loaded && !event.repeat && (pressed === 'p' || (pressed === 'escape' && state.paused))) {
+  // Leave browser and OS shortcuts such as Cmd+P and Cmd+M alone.
+  const shortcut = state.loaded && !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey;
+  if (shortcut && (pressed === 'p' || (pressed === 'escape' && state.paused))) {
     setPaused(!state.paused);
     event.preventDefault();
     return;
   }
-  if (state.loaded && !event.repeat && pressed === 'm') {
+  if (shortcut && pressed === 'm') {
     toggleMuted();
     return;
   }

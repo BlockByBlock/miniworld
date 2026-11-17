@@ -264,7 +264,7 @@ export function installDiagnostics(game) {
     }
   };
 
-  // Auto-walk hook: when a profile target exists, the game's game.player update
+  // Auto-walk hook: when a profile target exists, the game's player update
   // calls this first and skips its keyboard movement for the frame.
   function autoWalk(delta) {
     const target = window.__cryptWalkTarget;

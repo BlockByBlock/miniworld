@@ -43,6 +43,8 @@ test('discards checkpoints that do not match the current world', () => {
     { ...checkpoint, deadEnemies: ['missing-spawn'] },
     { ...checkpoint, openedChests: ['missing-chest'] },
     { ...checkpoint, equippedSlot: 0 },
+    { ...checkpoint, equippedSlot: '1' },
+    { ...checkpoint, position: { x: 0, z: 9 } },
     { ...checkpoint, playerHp: 0 },
     { ...checkpoint, gates: [{ corridorId: 'entry-corridor', wallRoomId: 'hub' }] },
   ];
