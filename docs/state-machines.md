@@ -120,14 +120,14 @@ The PR review added a crossing check for sideways movement along the destination
 
 ### Boot, scene and run outcome
 
-**State.** `mode` has explicit values `town` and `dungeon`. Readiness, pending entry, activity and outcome are represented by `loaded`, `teleporting` or `trailTimer`, `started`, browser `combatStarted`, and the `finished` and `failed` flags. The headless core is usable immediately. Browser startup spans sequential asset loads, world construction and two scene compiles. [Browser state](../src/main.js#L149-L192), [browser startup](../src/main.js#L3583-L3597), [headless state](../src/game/game-core.js#L82-L143).
+**State.** `mode` has explicit values `town` and `dungeon`. Readiness, pending entry, activity and outcome are represented by `loaded`, `teleporting` or `trailTimer`, `started`, browser `combatStarted`, the `finished` and `failed` flags, and browser `paused`. The headless core is usable immediately. Browser startup spans parallel asset loads, world construction and two scene compiles, then resumes a valid browser checkpoint if one is stored. [Browser state](../src/main.js#L149-L192), [browser startup](../src/main.js#L3583-L3597), [headless state](../src/game/game-core.js#L82-L143).
 
-**Invariants.** The town and dungeon have separate bounds and only the active scene renders. A pending trail belongs to the town session. Entering the crypt puts the player in the Entrance Vault and resets discovery. `started` and `combatStarted` indicate activity and enemy activation. The run is active until one outcome flag is set. Defeat requires zero player HP. The terminal result is stable until restart or a headless restore. See issues [2](#2-stop-headless-movement-at-simulation-boundaries), [4](#4-freeze-gameplay-and-hud-at-the-terminal-transition), [5](#5-route-input-according-to-focus-and-game-mode), [9](#9-validate-headless-commands-and-stabilize-timer-stepping) and [11](#11-show-a-startup-error-when-webgl-is-unavailable).
+**Invariants.** The town and dungeon have separate bounds and only the active scene renders. A pending trail belongs to the town session. Entering the crypt from town puts the player in the Entrance Vault and resets discovery; resuming a browser checkpoint enters at its saved room instead. A paused run keeps its state and accepts only pause and sound input. `started` and `combatStarted` indicate activity and enemy activation. The run is active until one outcome flag is set. Defeat requires zero player HP. The terminal result is stable until restart or a headless restore. See issues [2](#2-stop-headless-movement-at-simulation-boundaries), [4](#4-freeze-gameplay-and-hud-at-the-terminal-transition), [5](#5-route-input-according-to-focus-and-game-mode), [9](#9-validate-headless-commands-and-stabilize-timer-stepping) and [11](#11-show-a-startup-error-when-webgl-is-unavailable).
 
 | From | Event and guard | To and effects |
 | --- | --- | --- |
 | Browser module setup | Renderer created and startup starts | Loading assets, then building and compiling the world |
-| Loading or compiling | All assets and compiles succeed | Ready in town. The loading card hides after 420 ms |
+| Loading or compiling | All assets and compiles succeed | Ready in town, or resumed in the crypt when a valid browser checkpoint is stored. The loading card hides after 420 ms |
 | Renderer setup, loading or compiling | Startup fails | Loading card displays the WebGL or asset error |
 | Renderer available | WebGL context lost | Pause frames and gameplay input, clear held input and show the graphics status |
 | Renderer paused | WebGL context restored | Resume frames and controls when the run permits them. Complete an overdue town trail |
@@ -136,11 +136,15 @@ The PR review added a crossing check for sideways movement along the destination
 | Trail pending | Repeat the interaction | Original deadline stays in place. Headless returns `trail-pending` |
 | Trail pending | Timer expires | Dungeon entrance at `(0, 26.8)`. Reset entry and discovery state. Browser reparents the player and resets the camera |
 | Dungeon active | Movement input or an accepted offensive action in the browser | `started` and `combatStarted` true. Interaction, target selection and self-casts can set `started` independently |
+| Browser run active | `P` or the pause button | Paused. Frames render, but gameplay, camera follow and gameplay input stop and held input clears |
+| Paused | `P`, `Esc` or Resume | Active. A town trail that expired while paused completes |
+| Browser dungeon active | Room entry, opened reliquary, or page hidden or unloaded | Write a checkpoint unless the run is terminal or the page uses `?e2e` |
 | Dungeon active | Shared completion predicate and distance to exit strictly below 2.4 | `finished = true`. Browser shows the win card. Headless records success |
 | Dungeon active | Unabsorbed damage reduces HP to zero | `failed = true`. Browser shows the defeat card. Headless records failure |
-| Terminal | Browser restart button or headless `startNewGame()` | Browser reloads. Headless replaces state and clears the event log |
+| Terminal | Browser restart button or headless `startNewGame()` | Browser reloads. Defeat keeps the checkpoint at full vitality, so the reload resumes it; victory clears it. Headless replaces state and clears the event log |
+| Paused or browser defeat | New game | Clear the checkpoint, then reload into town |
 
-Sources for the entry and terminal transitions. [Browser entry](../src/main.js#L1753-L1799), [outcome and restart](../src/main.js#L3542-L3585), [browser frame](../src/main.js#L3648-L3726), [headless entry and reset](../src/game/game-core.js#L205-L221), [headless talk](../src/game/game-core.js#L272-L303), [headless timers and outcome](../src/game/game-core.js#L566-L644).
+Sources for the entry and terminal transitions. [Browser entry](../src/main.js#L1753-L1799), [outcome and restart](../src/main.js#L3542-L3585), [browser frame](../src/main.js#L3648-L3726), [headless entry and reset](../src/game/game-core.js#L205-L221), [headless talk](../src/game/game-core.js#L272-L303), [headless timers and outcome](../src/game/game-core.js#L566-L644), [checkpoint validation and storage](../src/save-game.js).
 
 ### Movement, gates, room entry and visibility
 
@@ -276,7 +280,7 @@ Headless enemies hold spawn positions. Their states are dormant, awake outside a
 | Keyboard smoke idle | Start command | Move to Rowan, capture the baseline and clear the old result |
 | Smoke sampled | Movement, interaction, then finish | Consume the sample and report movement direction, NPC interaction and runtime errors |
 
-[Snapshot and error publication](../src/main.js#L221-L326), [profile state and finalization](../src/main.js#L3813-L3957), [target polling](../src/optimization-contracts.js#L20-L38), [fast checkpoint and smoke](../src/main.js#L3984-L4170).
+[Snapshots, profiler, fast checkpoint and smoke](../src/diagnostics.js), [target polling](../src/optimization-contracts.js#L20-L38).
 
 ### Presentation and resource lifecycles
 
@@ -295,9 +299,10 @@ Headless enemies hold spawn positions. Their states are dormant, awake outside a
 | Adaptive resolution | Sampling | Invalid or hidden frame | Discard the current frame sample |
 | Adaptive resolution | Sampling, cooldown expired | One-second sample above 20 ms, or two qualifying samples below 17.2 ms | Adjust scale by −0.10 or +0.05 respectively, clamp, and start 1.5 s cooldown |
 | Web Audio | Uninitialized or suspended | Keyboard or pointer gesture | Initialize context and noise buffer once. Request resume when suspended |
-| Web Audio | Running | Play cue | Start scheduled nodes and stop them at their deadlines. In other context states, playback is skipped |
+| Web Audio | Running | Play cue | Start scheduled nodes and stop them at their deadlines. In other context states, or while muted, playback is skipped |
+| Sound preference | On or muted | `M` or the pause screen's sound button | Toggle mute and store the choice in `localStorage` |
 
-[Toast timer](../src/main.js#L433-L438), [dialogue timer](../src/main.js#L1720-L1726), [town patrol](../src/main.js#L1575-L1626), [actor clip](../src/main.js#L674-L698), [visual updates](../src/main.js#L2700-L2765), [burst release](../src/main.js#L2868-L2881), [slot pool](../src/optimization-contracts.js#L40-L46), [adaptive resolution](../src/main.js#L938-L977), [audio](../src/audio.js#L5-L49).
+[Toast timer](../src/main.js#L433-L438), [dialogue timer](../src/main.js#L1720-L1726), [town patrol](../src/main.js#L1575-L1626), [actor clip](../src/actor.js), [visual updates](../src/main.js#L2700-L2765), [burst release](../src/main.js#L2868-L2881), [slot pool](../src/optimization-contracts.js#L40-L46), [adaptive resolution](../src/main.js#L938-L977), [audio](../src/audio.js#L5-L49).
 
 ## Verification and limits
 

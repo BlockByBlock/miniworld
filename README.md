@@ -57,6 +57,15 @@ it. Once all guardians are defeated and the Warden's spoils are claimed, return
 through the southern entrance to finish. Room caches provide small recovery and
 cooldown relief.
 
+Press `P` or the pause button to pause; `P` or `Esc` resumes, and `M` toggles
+sound. The browser saves a checkpoint in `localStorage` when you enter a
+chamber, open a reliquary, or leave the page, and reloading resumes the delve
+from it. A checkpoint keeps your vitality, backpack, objectives, cleared
+enemies, dropped loot, and gate placement; enemies still alive return to their
+posts. After a defeat, **Retry from checkpoint** resumes the last checkpoint
+with full vitality. **New game** on the pause or end screen discards it, and
+victory clears it. Pages opened with `?e2e` never read or write the checkpoint.
+
 ## Build
 
 ```sh
@@ -69,7 +78,7 @@ The game rules are split from the 3D presentation:
 
 - `src/game/world-rules.js` — pure, shared gameplay decisions (gate/chest gating, chest rewards, loot table, damage math, win condition). Both the rendered game and the headless core import these, so there is one definition of each rule.
 - `src/game/game-core.js` — a fully deterministic headless simulation (`createGameCore({ worldData })`). Agents drive it through semantic actions (`talkTo`, `moveTo`, `interact`, `openGate`, `useAction`, `equip`) instead of keyboard or mouse input, advance time explicitly with `tick(delta)`, save/restore checkpoints mid-run for controlled start states, and read structured state via `describe()` and an event log. Room-clearing during agent routes may use the explicit `clearRoom()` test affordance (an accelerated stand-in for combat); the warden fight itself is fought through semantic `useAction` calls.
-- `src/main.js` — rendering, animation, audio, input, and UI; it delegates gameplay decisions to the shared rules.
+- `src/main.js` — the rendered client's frame loop, combat presentation, input, and UI; it delegates gameplay decisions to the shared rules. Supporting client modules: `actor.js` (animated characters and nameplates), `crypt-builder.js` (static models, walls, floors, and room dressing), `minimap.js`, `models.js` (the loaded glTF registry), `save-game.js` (checkpoint validation and storage), `audio.js`, and `diagnostics.js` (the `?e2e` browser checks and `__cryptRun` profiler).
 
 Run a full New Game-to-victory delve headlessly (no browser) with `npm run test:headless`.
 The headless model omits furniture collisions and simplifies combat timing,

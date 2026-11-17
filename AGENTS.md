@@ -8,7 +8,8 @@ simulation. `README.md` describes the game and local setup.
 - `src/game/world-rules.js` owns shared gameplay decisions: gate/chest gating,
   rewards, damage, and victory. Both the rendered game and headless simulation
   consume these rules; change the owning rule rather than duplicating it.
-- `src/main.js` owns rendering, animation, audio, input, and UI.
+- `src/main.js` and its sibling client modules in `src/` own rendering,
+  animation, audio, input, UI, and browser checkpoints.
   `src/game/game-core.js` operates on plain state without THREE, DOM, or timers.
   Headless actions are semantic (`talkTo`, `moveTo`, `interact`, `openGate`,
   `useAction`, `equip`, `consume`); advance time with `tick(delta)` and inspect
@@ -40,6 +41,8 @@ Commands are defined in `package.json`:
 - Gameplay or progression changes: also run `npm run test:headless`.
 - Rendering, animation, camera, input, or UI changes: inspect the affected flow
   in-browser with `npm run dev`; headless tests do not cover presentation.
+  A plain page resumes the saved checkpoint in `localStorage`; `?e2e` pages
+  start fresh in town and never read or write it.
 - Documentation-only changes: run `git diff --check`.
 
 `clearRoom()` accelerates tests by standing in for combat. It does not establish

@@ -67,7 +67,7 @@ button {
   left: 28px;
   right: 28px;
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) minmax(240px, 0.7fr) auto;
+  grid-template-columns: minmax(210px, 1fr) minmax(240px, 0.7fr) auto auto;
   align-items: center;
   gap: 28px;
   padding: 16px 20px;
@@ -793,6 +793,47 @@ kbd {
   transform: translateY(-1px);
 }
 
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 23px;
+}
+
+.card-actions button {
+  margin-top: 0;
+}
+
+.end-card button.secondary {
+  background: transparent;
+  color: #f3d8aa;
+}
+
+.end-card button.secondary:hover {
+  background: rgba(239, 221, 182, 0.1);
+}
+
+.pause-button {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(239, 221, 182, 0.25);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f3d8aa;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  pointer-events: auto;
+}
+
+.pause-button:hover {
+  background: rgba(239, 221, 182, 0.12);
+}
+
 .is-hidden {
   display: none !important;
 }
@@ -802,7 +843,7 @@ kbd {
     top: 13px;
     left: 13px;
     right: 13px;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr auto auto;
     gap: 12px 18px;
     padding: 12px 14px;
   }

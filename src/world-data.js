@@ -49,7 +49,7 @@ function createFailureCollector() {
   };
 }
 
-function isFiniteNumber(value) {
+export function isFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 

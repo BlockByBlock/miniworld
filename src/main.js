@@ -3,14 +3,14 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { VisibilityGroup } from './visibility-group.js';
-import { brickWallCornerRotation, brickWallDimensions } from './crypt-wall-geometry.js';
+import { Actor } from './actor.js';
+import { createWorldBuilder } from './crypt-builder.js';
+import { installDiagnostics } from './diagnostics.js';
+import { createMinimap } from './minimap.js';
+import { assets } from './models.js';
 import {
   collectDungeonLightRecipes,
-  createCryptProfile,
   createSlotPool,
-  waitForProfileTarget,
 } from './optimization-contracts.js';
 import {
   cameraRelativeDirection,
@@ -18,9 +18,9 @@ import {
   isWalkablePoint,
   stepActorWithinMap,
 } from './movement-contracts.js';
-import { initAudio, playSfx } from './audio.js';
+import { initAudio, isMuted, playSfx, setMuted } from './audio.js';
+import { browserStorage, clearCheckpoint, readCheckpoint, writeCheckpoint } from './save-game.js';
 import { WORLD_DATA } from './world-data.js';
-import { ROOM_DECORATIONS } from './game/room-decorations.js';
 import {
   DUNGEON_ENTRANCE,
   EXIT_POSITION,
@@ -63,6 +63,12 @@ const endEyebrow = $('#end-eyebrow');
 const endTitle = $('#end-title');
 const endCopy = $('#end-copy');
 const restartButton = $('#restart-button');
+const endNewGameButton = $('#end-new-game-button');
+const pauseButton = $('#pause-button');
+const pauseScreen = $('#pause-screen');
+const resumeButton = $('#resume-button');
+const soundButton = $('#sound-button');
+const pauseNewGameButton = $('#pause-new-game-button');
 const objective = $('#objective');
 const objectiveDetail = $('#objective-detail');
 const healthValue = $('#health-value');
@@ -77,7 +83,6 @@ const interaction = $('#interaction');
 const toast = $('#toast');
 const abilitySlots = [...document.querySelectorAll('[data-ability]')];
 const minimap = $('#minimap');
-const minimapContext = minimap.getContext('2d');
 const areaName = $('#area-name');
 const minimapLabel = $('#minimap-label');
 const backpackSlots = [...document.querySelectorAll('[data-inventory-slot]')];
@@ -154,6 +159,7 @@ const state = {
   combatStarted: false,
   finished: false,
   failed: false,
+  paused: false,
   playerHp: 100,
   playerMaxHp: 100,
   playerBuffTimer: 0,
@@ -191,12 +197,17 @@ const state = {
   lastInteraction: null,
 };
 
-const isRunActive = () => state.loaded && !state.finished && !state.failed;
+const runInProgress = () => state.loaded && !state.finished && !state.failed;
+const isRunActive = () => runInProgress() && !state.paused;
 const canPlay = () => isRunActive() && !renderingPaused;
 let renderingPaused = false;
+// Diagnostics drive the game from a fresh town, so ?e2e runs never read or
+// overwrite the player's checkpoint.
+let saveStorage = E2E_ENABLED ? null : browserStorage();
+let checkpointPosition = null;
+const MUTED_KEY = 'forgotten-crypt:muted';
 
 const keys = new Set();
-const assets = new Map();
 const enemies = [];
 const townNpcs = [];
 const staticColliders = [];
@@ -218,117 +229,32 @@ const navigation = createNavigationContext({
   staticColliders,
   townStaticColliders,
 });
-const e2eState = {
-  activeDiagnostic: null,
-  routeUsed: false,
-  errors: [],
-  smoke: null,
-  lastResult: null,
-  fastGateTransitions: 0,
-};
-let e2eStatus = null;
-
-function e2eSnapshot() {
-  return {
-    mode: state.mode,
-    zoneId: state.currentZoneId,
-    roomId: state.currentRoomId,
-    position: player
-      ? { x: player.root.position.x, y: player.root.position.y, z: player.root.position.z }
-      : null,
-    playerHp: state.playerHp,
-    seals: { ...state.seals },
-    archiveKey: state.archiveKey,
-    chests: state.chests.map((chest) => ({
-      id: chest.id,
-      roomId: chest.roomId,
-      kind: chest.kind,
-      opened: chest.opened,
-    })),
-    gates: state.gates.map((gate) => ({
-      corridorId: gate.corridorId,
-      open: gate.open,
-      fromRoomId: gate.fromRoomId,
-      toRoomId: gate.toRoomId,
-    })),
-    enemies: enemies.map((enemy) => ({ id: enemy.name, roomId: enemy.roomId, dead: enemy.dead })),
-    livingEnemies: countLivingEnemies(),
-    loot: lootDrops.map((drop) => ({ itemId: drop.itemId, collected: drop.collected })),
-    objectives: {
-      complete: runObjectivesComplete(),
-      title: objective.textContent,
-      detail: objectiveDetail.textContent,
-    },
-    finished: state.finished,
-    failed: state.failed,
-    interactionCount: state.interactionCount,
-    lastInteraction: state.lastInteraction,
-    windowRuntimeErrors: [...e2eState.errors],
-  };
-}
-
-let lastPublishAt = -Infinity;
-function publishE2eSnapshot(force = false) {
-  if (!E2E_ENABLED || !e2eStatus) return;
-  // Interface ticks call this every frame; serialize at most every 100 ms
-  // unless a caller forces it (results, errors, readiness flips).
-  const now = performance.now();
-  if (!force && now - lastPublishAt < 100) return;
-  lastPublishAt = now;
-  const snapshot = e2eSnapshot();
-  const serialized = JSON.stringify(snapshot);
-  app.dataset.gameReady = String(state.loaded);
-  app.dataset.e2eSnapshot = serialized;
-  app.dataset.e2eResult = e2eState.lastResult ? JSON.stringify(e2eState.lastResult) : '';
-  app.dataset.e2eErrors = JSON.stringify(e2eState.errors);
-  e2eStatus.value = serialized;
-  e2eStatus.textContent = serialized;
-}
-
-function sampleKeyboardSmokeMovement() {
-  const smoke = e2eState.smoke;
-  if (!smoke || !player) return;
-  const position = player.root.position;
-  if (smoke.sampleMode !== state.mode) {
-    smoke.sampleMode = state.mode;
-    smoke.sample = { x: position.x, z: position.z };
-    return;
-  }
-  const dx = position.x - smoke.sample.x;
-  const dz = position.z - smoke.sample.z;
-  const distance = Math.hypot(dx, dz);
-  if (distance > 0.0001) {
-    smoke.pathDistance += distance;
-    smoke.forwardTravel += dx * smoke.cameraForward.x + dz * smoke.cameraForward.z;
-  }
-  smoke.sample = { x: position.x, z: position.z };
-}
-
-function setE2eResult(result) {
-  e2eState.lastResult = result;
-  publishE2eSnapshot(true);
-}
-
-if (E2E_ENABLED) {
-  e2eStatus = document.createElement('output');
-  e2eStatus.id = 'e2e-status';
-  e2eStatus.hidden = true;
-  e2eStatus.setAttribute('aria-label', 'End-to-end test state');
-  app.append(e2eStatus);
-  window.addEventListener('error', (event) => {
-    e2eState.errors.push(event.error?.message ?? event.message ?? 'runtime error');
-    publishE2eSnapshot(true);
-  });
-  window.addEventListener('unhandledrejection', (event) => {
-    e2eState.errors.push(String(event.reason?.message ?? event.reason ?? 'unhandled rejection'));
-    publishE2eSnapshot(true);
-  });
-}
-
-let activeWorldGroup = null;
 const dungeonScene = new THREE.Scene();
 const townScene = new THREE.Scene();
 const scene = dungeonScene;
+const {
+  addBox,
+  addBrickWall,
+  buildRoomWalls,
+  buildZoneRenderGroup,
+  createFloorTiles,
+  createGateStatic,
+  createStatic,
+  decorateRoom,
+  roomCenter,
+  shiftStaticObject,
+  tileZone,
+} = createWorldBuilder({ scene, staticColliders, zoneRenderGroups, recordZoneLight });
+const updateMinimap = createMinimap({
+  canvas: minimap,
+  world: WORLD,
+  townWorld: TOWN_WORLD,
+  map: MAP,
+  roomBranch: ROOM_BRANCH,
+  state,
+  townNpcs,
+  getPlayer: () => player,
+});
 dungeonScene.background = new THREE.Color('#090b14');
 dungeonScene.fog = new THREE.FogExp2('#090b14', 0.018);
 townScene.background = new THREE.Color('#6e8f88');
@@ -395,8 +321,6 @@ function resumeRendering() {
 
 const clock = new THREE.Clock();
 const tempVector = new THREE.Vector3();
-const tempBox = new THREE.Box3();
-const tempSize = new THREE.Vector3();
 const raycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
 const projectedAnchor = new THREE.Vector3();
@@ -440,451 +364,6 @@ function setToast(message, duration = 2200) {
 function addCameraFeedback(shake = 0.08, fovKick = 0.8) {
   state.cameraShake = Math.max(state.cameraShake, shake);
   state.cameraFovKick = Math.max(state.cameraFovKick, fovKick);
-}
-
-function alignVisualToGround(visual, desiredHeight) {
-  visual.updateMatrixWorld(true);
-  tempBox.setFromObject(visual);
-  tempBox.getSize(tempSize);
-  if (desiredHeight && tempSize.y > 0.001) {
-    visual.scale.multiplyScalar(desiredHeight / tempSize.y);
-    visual.updateMatrixWorld(true);
-    tempBox.setFromObject(visual);
-  }
-  visual.position.y -= tempBox.min.y;
-  visual.updateMatrixWorld(true);
-}
-
-function fitStaticVisual(visual, { width, depth, height, stretch = false } = {}) {
-  visual.updateMatrixWorld(true);
-  tempBox.setFromObject(visual);
-  tempBox.getSize(tempSize);
-  const factors = [];
-  if (width && tempSize.x > 0.001) factors.push(width / tempSize.x);
-  if (depth && tempSize.z > 0.001) factors.push(depth / tempSize.z);
-  if (height && tempSize.y > 0.001) factors.push(height / tempSize.y);
-  if (factors.length) {
-    if (stretch) {
-      if (width && tempSize.x > 0.001) visual.scale.x *= width / tempSize.x;
-      if (depth && tempSize.z > 0.001) visual.scale.z *= depth / tempSize.z;
-      if (height && tempSize.y > 0.001) visual.scale.y *= height / tempSize.y;
-    } else {
-      visual.scale.multiplyScalar(Math.min(...factors));
-    }
-    visual.updateMatrixWorld(true);
-    tempBox.setFromObject(visual);
-  }
-  visual.position.y -= tempBox.min.y;
-  visual.updateMatrixWorld(true);
-}
-
-function findClip(clips, patterns) {
-  const wanted = patterns.map((pattern) => pattern.toLowerCase());
-  return clips.find((clip) => {
-    const name = clip.name.toLowerCase();
-    return wanted.some((pattern) => name.includes(pattern));
-  });
-}
-
-function cloneAbilityClip(clips, name, sourcePatterns, speed = 1) {
-  const source = findClip(clips, sourcePatterns);
-  if (!source) return null;
-  const clip = source.clone();
-  clip.name = name;
-  if (speed !== 1) {
-    clip.tracks = clip.tracks.map((track) => {
-      const next = track.clone();
-      next.times = Float32Array.from(track.times, (time) => time / speed);
-      return next;
-    });
-    clip.resetDuration();
-  }
-  return clip;
-}
-
-function createAbilityClips(clips) {
-  // ClaudeCraft uses these school-level names. We derive the same small set
-  // from the local CC0 rig so the demo keeps its own asset provenance.
-  return [
-    cloneAbilityClip(clips, 'Cast_Fire', ['spellcast_shoot'], 2.9),
-    cloneAbilityClip(clips, 'Cast_Frost', ['spellcast_raise'], 4.3),
-    cloneAbilityClip(clips, 'Cast_Arcane', ['spellcasting'], 1.85),
-    cloneAbilityClip(clips, 'Cast_Heal', ['spellcast_raise'], 4.8),
-  ].filter(Boolean);
-}
-
-function attachEquipment(visual, assetKey, boneName, { scale = 1, position = [0, 0, 0], rotation = [0, 0, 0] } = {}) {
-  const attachmentNames = [boneName, boneName.replace(/[._]/g, '')];
-  const attachmentPoint = attachmentNames.map((name) => visual.getObjectByName(name)).find(Boolean);
-  const source = assets.get(assetKey);
-  if (!attachmentPoint || !source) return null;
-  const equipment = source.scene.clone(true);
-  equipment.position.set(...position);
-  equipment.rotation.set(...rotation);
-  equipment.scale.setScalar(scale);
-  equipment.traverse((child) => {
-    if (!child.isMesh) return;
-    if (Array.isArray(child.material)) child.material = child.material.map((material) => material.clone());
-    else if (child.material) child.material = child.material.clone();
-  });
-  attachmentPoint.add(equipment);
-  return equipment;
-}
-
-function createEnemyNameplate(actor) {
-  const element = document.createElement('div');
-  element.className = 'enemy-nameplate is-hidden';
-  const name = document.createElement('span');
-  name.className = 'enemy-nameplate-name';
-  name.textContent = actor.name;
-  const healthTrack = document.createElement('div');
-  healthTrack.className = 'enemy-nameplate-track';
-  const healthFillElement = document.createElement('span');
-  healthTrack.append(healthFillElement);
-  const cast = document.createElement('div');
-  cast.className = 'enemy-cast is-hidden';
-  const castLabel = document.createElement('span');
-  castLabel.className = 'enemy-cast-label';
-  const castTrack = document.createElement('div');
-  castTrack.className = 'enemy-cast-track';
-  const castFill = document.createElement('span');
-  castTrack.append(castFill);
-  cast.append(castLabel, castTrack);
-  element.append(name, healthTrack, cast);
-  document.body.append(element);
-  return { element, healthFill: healthFillElement, cast, castLabel, castFill };
-}
-
-function createTownNameplate(actor) {
-  const element = document.createElement('div');
-  element.className = 'town-nameplate is-hidden';
-  const name = document.createElement('span');
-  name.className = 'town-nameplate-name';
-  name.textContent = actor.name;
-  const role = document.createElement('small');
-  role.className = 'town-nameplate-role';
-  role.textContent = actor.role;
-  element.append(name, role);
-  document.body.append(element);
-  return { element };
-}
-
-class Actor {
-  constructor({
-    assetKey,
-    type,
-    position,
-    height,
-    name,
-    role = 'resident',
-    maxHp = 1,
-    speed = 0,
-    profileKey = 'guard',
-    roomId = null,
-    sceneRoot = scene,
-  }) {
-    const source = assets.get(assetKey);
-    this.name = name;
-    this.role = role;
-    this.type = type;
-    this.root = new VisibilityGroup();
-    this.root.userData.actor = this;
-    this.root.position.copy(position);
-    this.spawnPosition = position.clone();
-    this.visual = SkeletonUtils.clone(source.scene);
-    alignVisualToGround(this.visual, height);
-    this.handWeapon = null;
-    this.backWeapon = null;
-    this.weaponSheathed = false;
-    if (type === 'player') {
-      this.handWeapon = attachEquipment(this.visual, 'sword', 'hand.r', {
-        scale: 1.05,
-        // The exported sword origin sits just below the grip. Rotate the
-        // blade forward from the hand and pull that grip back onto the bone.
-        position: [0.16, 0, 0],
-        rotation: [0, 0, Math.PI / 2],
-      });
-      this.backWeapon = attachEquipment(this.visual, 'sword', 'chest', {
-        scale: 1.05,
-        position: [0.06, 0.18, -0.18],
-        rotation: [Math.PI / 2, 0, -0.18],
-      });
-      this.setWeaponSheathed(true);
-    }
-    this.root.add(this.visual);
-    sceneRoot.add(this.root);
-
-    this.mixer = new THREE.AnimationMixer(this.visual);
-    this.clips = [...(source.animations ?? [])];
-    if (type === 'player') this.clips.push(...createAbilityClips(this.clips));
-    this.actions = new Map();
-    this.currentAction = null;
-    this.currentClipName = '';
-    this.attackLock = 0;
-    this.attackTimer = 0;
-    this.attackCooldown = 0;
-    this.pendingAction = null;
-    this.pendingEnemyAttack = null;
-    this.animationAccumulator = 0;
-    this.frozenTimer = 0;
-    this.specialCooldown = profileKey === 'warden' ? 3.5 : 0;
-    this.bossPhase = profileKey === 'warden' ? 1 : 0;
-    this.deathTimer = 0;
-    this.height = height;
-    this.maxHp = maxHp;
-    this.hp = maxHp;
-    this.speed = speed;
-    this.profileKey = profileKey;
-    this.roomId = roomId;
-    this.townPatrol = null;
-    this.dead = false;
-    this.awake = type === 'player';
-    this.evading = false;
-    this.lootDropped = false;
-    this.nameplate = type === 'enemy'
-      ? createEnemyNameplate(this)
-      : type === 'npc'
-        ? createTownNameplate(this)
-        : null;
-    this.play(type === 'player' ? ['idle'] : ['idle_combat', 'idle']);
-  }
-
-  setWeaponSheathed(sheathed) {
-    if (this.type !== 'player' || this.weaponSheathed === sheathed) return;
-    this.weaponSheathed = sheathed;
-    if (this.handWeapon) this.handWeapon.visible = !sheathed;
-    if (this.backWeapon) this.backWeapon.visible = sheathed;
-  }
-
-  setWeaponColor(color) {
-    const tint = new THREE.Color(color ?? '#d8c6a5');
-    for (const weapon of [this.handWeapon, this.backWeapon]) {
-      weapon?.traverse((child) => {
-        if (!child.isMesh) return;
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        for (const material of materials) {
-          if (!material) continue;
-          if ('emissive' in material) material.emissive.copy(tint).multiplyScalar(color ? 0.16 : 0);
-          if ('emissiveIntensity' in material) material.emissiveIntensity = color ? 0.75 : 0;
-        }
-      });
-    }
-  }
-
-  actionFor(clip) {
-    if (!clip) return null;
-    if (!this.actions.has(clip.name)) this.actions.set(clip.name, this.mixer.clipAction(clip));
-    return this.actions.get(clip.name);
-  }
-
-  play(patterns, { once = false, force = false } = {}) {
-    const clip = findClip(this.clips, patterns);
-    if (!clip) return;
-    if (!force && this.currentClipName === clip.name) return;
-    const next = this.actionFor(clip);
-    const previous = this.currentAction;
-    if (previous && previous !== next) previous.fadeOut(0.11);
-    next.reset().fadeIn(0.11);
-    if (once) {
-      next.setLoop(THREE.LoopOnce, 1);
-      next.clampWhenFinished = true;
-    } else {
-      next.setLoop(THREE.LoopRepeat, Infinity);
-      next.clampWhenFinished = false;
-    }
-    next.play();
-    this.currentAction = next;
-    this.currentClipName = clip.name;
-  }
-
-  face(position) {
-    const dx = position.x - this.root.position.x;
-    const dz = position.z - this.root.position.z;
-    if (Math.abs(dx) + Math.abs(dz) > 0.001) this.root.rotation.y = Math.atan2(dx, dz);
-  }
-
-  faceDirection(direction) {
-    if (Math.abs(direction.x) + Math.abs(direction.z) > 0.001) {
-      this.root.rotation.y = Math.atan2(direction.x, direction.z);
-    }
-  }
-
-  update(delta, animationInterval = 0) {
-    if (animationInterval !== null) {
-      this.animationAccumulator += delta;
-      if (animationInterval <= 0 || this.animationAccumulator >= animationInterval) {
-        this.mixer.update(this.animationAccumulator);
-        this.animationAccumulator = 0;
-      }
-    }
-    this.attackCooldown = Math.max(0, this.attackCooldown - delta);
-    this.attackLock = Math.max(0, this.attackLock - delta);
-    this.frozenTimer = Math.max(0, this.frozenTimer - delta);
-    this.specialCooldown = Math.max(0, this.specialCooldown - delta);
-  }
-}
-
-function addWorldObject(object, parent = null) {
-  (parent ?? activeWorldGroup ?? scene).add(object);
-  return object;
-}
-
-function buildZoneRenderGroup(zone, build) {
-  const group = new VisibilityGroup();
-  group.name = `zone:${zone.id}`;
-  zoneRenderGroups.set(zone.id, group);
-  scene.add(group);
-  const previousGroup = activeWorldGroup;
-  activeWorldGroup = group;
-  try {
-    build();
-  } finally {
-    activeWorldGroup = previousGroup;
-  }
-}
-
-function createStatic(assetKey, {
-  x = 0,
-  y = 0,
-  z = 0,
-  rotationY = 0,
-  width,
-  depth,
-  height,
-  stretch = false,
-  colliderWidth = 0,
-  colliderDepth = 0,
-  parent = null,
-  colliders = staticColliders,
-} = {}) {
-  const source = assets.get(assetKey);
-  const root = new THREE.Group();
-  const visual = source.scene.clone(true);
-  fitStaticVisual(visual, { width, depth, height, stretch });
-  root.add(visual);
-  root.position.set(x, y, z);
-  root.rotation.y = rotationY;
-  addWorldObject(root, parent);
-  if (colliderWidth > 0 && colliderDepth > 0) {
-    const quarterTurn = Math.abs(Math.sin(rotationY)) > 0.5;
-    const collider = {
-      root,
-      minX: x - (quarterTurn ? colliderDepth : colliderWidth) / 2,
-      maxX: x + (quarterTurn ? colliderDepth : colliderWidth) / 2,
-      minZ: z - (quarterTurn ? colliderWidth : colliderDepth) / 2,
-      maxZ: z + (quarterTurn ? colliderWidth : colliderDepth) / 2,
-    };
-    root.userData.staticCollider = collider;
-    colliders.push(collider);
-  }
-  return root;
-}
-
-function createGateStatic({ x, z, travelsAlongZ, span, height, parent }) {
-  const source = assets.get('archGate');
-  const root = new THREE.Group();
-  const visual = source.scene.clone(true);
-
-  visual.updateMatrixWorld(true);
-  tempBox.setFromObject(visual);
-  tempBox.getSize(tempSize);
-  const localSpanAxis = tempSize.x >= tempSize.z ? 'x' : 'z';
-  const heightScale = height / tempSize.y;
-  visual.scale.setScalar(heightScale);
-  visual.updateMatrixWorld(true);
-
-  tempBox.setFromObject(visual);
-  tempBox.getSize(tempSize);
-  visual.scale[localSpanAxis] *= span / tempSize[localSpanAxis];
-  visual.updateMatrixWorld(true);
-
-  tempBox.setFromObject(visual);
-  const center = tempBox.getCenter(new THREE.Vector3());
-  visual.position.x -= center.x;
-  visual.position.y -= tempBox.min.y;
-  visual.position.z -= center.z;
-  visual.updateMatrixWorld(true);
-  root.add(visual);
-  root.position.set(x, 0, z);
-  const localSpanAlongX = localSpanAxis === 'x';
-  root.rotation.y = localSpanAlongX === travelsAlongZ ? 0 : Math.PI / 2;
-  addWorldObject(root, parent);
-
-  const colliderWidth = travelsAlongZ ? span : 0.65;
-  const colliderDepth = travelsAlongZ ? 0.65 : span;
-  const collider = {
-    root,
-    minX: x - colliderWidth / 2,
-    maxX: x + colliderWidth / 2,
-    minZ: z - colliderDepth / 2,
-    maxZ: z + colliderDepth / 2,
-  };
-  root.userData.staticCollider = collider;
-  staticColliders.push(collider);
-  return root;
-}
-
-function shiftStaticObject(root, offsetX, offsetZ) {
-  root.position.x += offsetX;
-  root.position.z += offsetZ;
-  const collider = root.userData.staticCollider;
-  if (!collider) return;
-  collider.minX += offsetX;
-  collider.maxX += offsetX;
-  collider.minZ += offsetZ;
-  collider.maxZ += offsetZ;
-}
-
-function createFloorTiles(placements) {
-  const source = assets.get('floorTile');
-  const template = source.scene.clone(true);
-  fitStaticVisual(template, { width: 1.92, depth: 1.92 });
-  template.updateMatrixWorld(true);
-
-  const translation = new THREE.Matrix4();
-  const instanceMatrix = new THREE.Matrix4();
-  template.traverse((child) => {
-    if (!child.isMesh) return;
-    const tiles = new THREE.InstancedMesh(child.geometry, child.material, placements.length);
-    tiles.name = 'instanced-floor-tiles';
-    placements.forEach(({ x, z }, index) => {
-      translation.makeTranslation(x, 0, z);
-      instanceMatrix.multiplyMatrices(translation, child.matrixWorld);
-      tiles.setMatrixAt(index, instanceMatrix);
-    });
-    tiles.instanceMatrix.needsUpdate = true;
-    tiles.computeBoundingSphere();
-    addWorldObject(tiles);
-  });
-}
-
-function addBox({
-  x,
-  y,
-  z,
-  width,
-  height,
-  depth,
-  material,
-  colliderWidth = 0,
-  colliderDepth = 0,
-  parent = null,
-}) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-  mesh.position.set(x, y, z);
-  addWorldObject(mesh, parent);
-  if (colliderWidth > 0 && colliderDepth > 0) {
-    const collider = {
-      root: mesh,
-      minX: x - colliderWidth / 2,
-      maxX: x + colliderWidth / 2,
-      minZ: z - colliderDepth / 2,
-      maxZ: z + colliderDepth / 2,
-    };
-    mesh.userData.staticCollider = collider;
-    staticColliders.push(collider);
-  }
-  return mesh;
 }
 
 // Point-light pool: the dungeon uses a fixed set of always-visible lights whose
@@ -1023,239 +502,6 @@ function updateBlobShadows() {
   shadowMesh.instanceMatrix.needsUpdate = true;
 }
 
-function addBrickWall({
-  x,
-  z,
-  width,
-  depth,
-  rotationY = 0,
-  colliderWidth = 0,
-  colliderDepth = 0,
-  parent = null,
-}) {
-  return createStatic('wall', {
-    x,
-    z,
-    rotationY,
-    width,
-    depth,
-    height: 2.7,
-    stretch: true,
-    colliderWidth,
-    colliderDepth,
-    parent,
-  });
-}
-
-function addWallSpan({ fixed, start, end, openings = [], horizontal, parent = null }) {
-  const clippedOpenings = openings
-    .map(([openStart, openEnd]) => [Math.max(start, openStart), Math.min(end, openEnd)])
-    .filter(([openStart, openEnd]) => openEnd - openStart > 0.1)
-    .sort((first, second) => first[0] - second[0]);
-  let cursor = start;
-  for (const [openStart, openEnd] of clippedOpenings) {
-    if (openStart - cursor > 0.45) {
-      const length = openStart - cursor;
-      const wallDimensions = brickWallDimensions({ horizontal, length, thickness: 0.5 });
-      addBrickWall({
-        x: horizontal ? (cursor + openStart) / 2 : fixed,
-        z: horizontal ? fixed : (cursor + openStart) / 2,
-        ...wallDimensions,
-        parent,
-      });
-    }
-    cursor = Math.max(cursor, openEnd);
-  }
-  if (end - cursor > 0.45) {
-    const length = end - cursor;
-    const wallDimensions = brickWallDimensions({ horizontal, length, thickness: 0.5 });
-    addBrickWall({
-      x: horizontal ? (cursor + end) / 2 : fixed,
-      z: horizontal ? fixed : (cursor + end) / 2,
-      ...wallDimensions,
-      parent,
-    });
-  }
-}
-
-function buildRoomWalls(room) {
-  const openings = room.openings ?? {};
-  addWallSpan({
-    fixed: room.minZ,
-    start: room.minX,
-    end: room.maxX,
-    openings: openings.north,
-    horizontal: true,
-  });
-  addWallSpan({
-    fixed: room.maxZ,
-    start: room.minX,
-    end: room.maxX,
-    openings: openings.south,
-    horizontal: true,
-  });
-  addWallSpan({
-    fixed: room.minX,
-    start: room.minZ,
-    end: room.maxZ,
-    openings: openings.west,
-    horizontal: false,
-  });
-  addWallSpan({
-    fixed: room.maxX,
-    start: room.minZ,
-    end: room.maxZ,
-    openings: openings.east,
-    horizontal: false,
-  });
-
-  const corners = [
-    [room.minX, room.minZ, true, true],
-    [room.maxX, room.minZ, false, true],
-    [room.maxX, room.maxZ, false, false],
-    [room.minX, room.maxZ, true, false],
-  ];
-  corners.forEach(([x, z, west, north]) => {
-    addDecoration('wallCorner', x, z, {
-      height: 2.7,
-      rotationY: brickWallCornerRotation({ west, north }),
-    });
-  });
-}
-
-function tileZone(zone, placements) {
-  for (let x = zone.minX + 1; x < zone.maxX; x += 2) {
-    for (let z = zone.minZ + 1; z < zone.maxZ; z += 2) {
-      placements.push({ x, z });
-    }
-  }
-}
-
-function roomCenter(room) {
-  return {
-    x: (room.minX + room.maxX) / 2,
-    z: (room.minZ + room.maxZ) / 2,
-  };
-}
-
-function addColumn(x, z, height = 2.7) {
-  return createStatic('column', {
-    x,
-    z,
-    width: 1.05,
-    height,
-    colliderWidth: 0.9,
-    colliderDepth: 0.9,
-  });
-}
-
-function addTomb(x, z, rotationY = 0, scale = 1) {
-  return createStatic('crypt', {
-    x,
-    z,
-    rotationY,
-    width: 2.5 * scale,
-    height: 1.55 * scale,
-    colliderWidth: 2.35 * scale,
-    colliderDepth: 1.25 * scale,
-  });
-}
-
-function addDecoration(assetKey, x, z, {
-  y = 0,
-  rotationY = 0,
-  width,
-  depth,
-  height,
-  colliderWidth = 0,
-  colliderDepth = 0,
-} = {}) {
-  return createStatic(assetKey, {
-    x,
-    y,
-    z,
-    rotationY,
-    width,
-    depth,
-    height,
-    colliderWidth,
-    colliderDepth,
-  });
-}
-
-function addBrokenFloor(assetKey, x, z, rotationY = 0) {
-  return addDecoration(assetKey, x, z, {
-    y: 0.025,
-    rotationY,
-    width: 1.82,
-    depth: 1.82,
-  });
-}
-
-function addWallTorch(room, wall, along) {
-  const inset = 0.58;
-  const positions = {
-    west: { x: room.minX + inset, z: along, rotationY: Math.PI / 2 },
-    east: { x: room.maxX - inset, z: along, rotationY: -Math.PI / 2 },
-    north: { x: along, z: room.minZ + inset, rotationY: 0 },
-    south: { x: along, z: room.maxZ - inset, rotationY: Math.PI },
-  };
-  createStatic('torch', { ...positions[wall], height: 2.2 });
-}
-
-function addRoomLight(room, color, intensity = 1.35) {
-  const center = roomCenter(room);
-  recordZoneLight(room.id, { x: center.x, z: center.z, color, intensity });
-}
-
-// Decoration ops are data (src/game/room-decorations.js); this is the
-// interpreter that maps each op onto the world-building helpers.
-const DECOR_OPS = {
-  column: (_, { x, z, height = 2.7 }) => addColumn(x, z, height),
-  tomb: (_, { x, z, rotationY = 0, scale = 1 }) => addTomb(x, z, rotationY, scale),
-  torch: (room, { wall, along }) => addWallTorch(room, wall, along),
-  decoration: (room, { asset, x, z, ...options }) => addDecoration(asset, x, z, options),
-  brokenFloor: (_, { asset, x, z, rotationY }) => addBrokenFloor(asset, x, z, rotationY),
-  light: (room, { color, intensity }) => addRoomLight(room, color, intensity),
-  zoneLight: (room, { x, z, color, intensity }) => recordZoneLight(room.id, { x, z, color, intensity }),
-  box: (_, spec) => addBox(spec),
-  water: (_, { spots, ...spec }) => {
-    const material = new THREE.MeshStandardMaterial({ color: 0x244e61, roughness: 0.42, metalness: 0.14 });
-    for (const [x, z] of spots) {
-      addBox({ x, y: 0.03, z, width: spec.width, height: spec.height ?? 0.08, depth: spec.depth, material });
-    }
-  },
-  bookcases: () => {
-    for (const z of [-21, -25, -29]) {
-      addDecoration('bookcase', -10.4, z, {
-        height: 2.35,
-        rotationY: Math.PI / 2,
-        colliderWidth: 0.75,
-        colliderDepth: 1.65,
-      });
-      addDecoration('bookcase', 10.4, z, {
-        height: 2.35,
-        rotationY: -Math.PI / 2,
-        colliderWidth: 0.75,
-        colliderDepth: 1.65,
-      });
-    }
-  },
-};
-
-// ['minX'|'maxX'|'minZ'|'maxZ', offset] resolves relative to the room bounds.
-function resolveCoordinate(value, room) {
-  return Array.isArray(value) ? room[value[0]] + value[1] : value;
-}
-
-function decorateRoom(room) {
-  for (const { op: name, x, z, ...spec } of ROOM_DECORATIONS[room.id] ?? []) {
-    const operation = DECOR_OPS[name];
-    if (!operation) throw new Error(`Unknown decoration op ${name} in ${room.id}`);
-    operation(room, { ...spec, x: resolveCoordinate(x, room), z: resolveCoordinate(z, room) });
-  }
-}
-
 function buildCrypt() {
   const floorMaterial = new THREE.MeshStandardMaterial({
     color: 0x252839,
@@ -1352,6 +598,7 @@ function buildChests() {
 }
 
 function moveGateAssemblyToRoom(gate, roomId) {
+  gate.wallRoomId = roomId;
   const corridor = ZONE_BY_ID.get(gate.corridorId);
   const nextPosition = gateWallPosition(corridor, ZONE_BY_ID.get(roomId), gate.travelsAlongZ);
   const offsetX = nextPosition.x - gate.position.x;
@@ -1514,6 +761,7 @@ function buildGates() {
       roomIds,
       travelsAlongZ,
       position: new THREE.Vector3(x, 0, z),
+      wallRoomId: firstRoom.id,
       root,
       wallFrames,
       open: false,
@@ -1532,7 +780,7 @@ function buildActors() {
   for (const spawn of WORLD_DATA.enemySpawns) {
     const profile = ENEMY_PROFILES[spawn.profileKey];
     const [x, z] = spawn.position;
-    enemies.push(spawnActor({
+    const enemy = spawnActor({
       assetKey: spawn.assetKey,
       type: 'enemy',
       name: spawn.name,
@@ -1543,7 +791,9 @@ function buildActors() {
       speed: profile.speed,
       profileKey: spawn.profileKey,
       roomId: spawn.roomId,
-    }));
+    });
+    enemy.spawnId = spawn.id;
+    enemies.push(enemy);
   }
 }
 
@@ -1750,7 +1000,7 @@ function nearestTownNpc(maxDistance = Infinity) {
   return nearest;
 }
 
-function enterDungeon() {
+function enterDungeon(checkpoint = null) {
   if (!canPlay() || state.mode === 'dungeon') return;
   window.clearTimeout(trailTimeout);
   trailTimeout = null;
@@ -1759,25 +1009,98 @@ function enterDungeon() {
   for (const npc of townNpcs) npc.nameplate?.element.classList.add('is-hidden');
   window.clearTimeout(dialogueTimeout);
   dialogueCard.classList.add('is-hidden');
-  state.started = false;
+  // A resumed run is already underway, so the HUD shows its real objective;
+  // enemies still wait for movement through combatStarted.
+  state.started = Boolean(checkpoint);
   state.combatStarted = false;
   player.root.removeFromParent();
   scene.add(player.root);
-  player.root.position.set(DUNGEON_ENTRANCE.x, 0, DUNGEON_ENTRANCE.z);
+  const entry = checkpoint?.position ?? DUNGEON_ENTRANCE;
+  player.root.position.set(entry.x, 0, entry.z);
   player.root.rotation.y = 0;
   player.setWeaponSheathed(true);
-  state.currentRoomId = 'entrance';
-  state.currentZoneId = 'entrance';
-  state.discoveredRooms = new Set(['entrance']);
+  state.currentRoomId = checkpoint?.roomId ?? 'entrance';
+  state.currentZoneId = state.currentRoomId;
+  state.discoveredRooms = new Set([...(checkpoint?.discoveredRooms ?? []), state.currentRoomId]);
+  if (checkpoint) applyCheckpointProgress(checkpoint);
+  checkpointPosition = { x: entry.x, z: entry.z };
   visibleZoneIds.clear();
-  updateZoneVisibility('entrance', true);
+  updateZoneVisibility(state.currentRoomId, true);
   camera.position.set(player.root.position.x + 10.6, 11.5, player.root.position.z + 12.2);
   controls.target.set(player.root.position.x, 0.8, player.root.position.z);
   controls.update();
   updateModeUi();
   updateMinimap(0, true);
-  showDialogue('Ranger Rowan', 'The cryptwalker has arrived. Keep the old dead from reaching Ravenrest.', 3000);
-  setToast('Ranger Rowan sent you into the Forgotten Crypt.', 2600);
+  if (checkpoint) {
+    setToast(`Resumed in ${ZONE_BY_ID.get(state.currentRoomId)?.label ?? 'the crypt'}.`, 2600);
+  } else {
+    showDialogue('Ranger Rowan', 'The cryptwalker has arrived. Keep the old dead from reaching Ravenrest.', 3000);
+    setToast('Ranger Rowan sent you into the Forgotten Crypt.', 2600);
+  }
+  saveCheckpoint();
+}
+
+// Checkpoints keep durable progress only: the room-entry position, vitality,
+// backpack, objectives, cleared enemies, dropped loot, and gate placement.
+// Living enemies return to their spawns, so a resumed room restarts its fight.
+function saveCheckpoint() {
+  if (!saveStorage || state.mode !== 'dungeon' || !runInProgress() || !checkpointPosition) return;
+  writeCheckpoint(saveStorage, {
+    roomId: state.currentRoomId,
+    position: checkpointPosition,
+    discoveredRooms: [...state.discoveredRooms],
+    playerHp: state.playerHp,
+    inventory: [...state.inventory],
+    equippedSlot: state.equippedSlot,
+    seals: { ...state.seals },
+    archiveKey: state.archiveKey,
+    openedChests: state.chests.filter((chest) => chest.opened).map((chest) => chest.id),
+    deadEnemies: enemies.filter((enemy) => enemy.dead && enemy.spawnId).map((enemy) => enemy.spawnId),
+    loot: lootDrops.filter((drop) => !drop.collected).map(({ itemId, position }) => ({ itemId, x: position.x, z: position.z })),
+    // An open gate is saved as closed on the side it was opened from, the
+    // same placement applyGateOpen gives a gate closed by opening another.
+    gates: state.gates.map((gate) => ({
+      corridorId: gate.corridorId,
+      wallRoomId: gate.open ? gate.fromRoomId : gate.wallRoomId,
+      visibleFrames: gate.open
+        ? [gate.fromRoomId]
+        : gate.roomIds.filter((roomId) => gate.wallFrames.get(roomId)?.[0]?.visible),
+    })),
+  });
+}
+
+function applyCheckpointProgress(checkpoint) {
+  state.playerHp = Math.min(state.playerMaxHp, checkpoint.playerHp);
+  state.inventory.forEach((_, index) => {
+    state.inventory[index] = checkpoint.inventory[index] ?? null;
+  });
+  state.equippedSlot = checkpoint.equippedSlot;
+  player.setWeaponColor(equippedDefinition()?.color ?? null);
+  Object.assign(state.seals, checkpoint.seals);
+  state.archiveKey = checkpoint.archiveKey;
+  const openedChests = new Set(checkpoint.openedChests);
+  for (const chest of state.chests) {
+    if (openedChests.has(chest.id)) showChestOpened(chest);
+  }
+  state.openedChests = openedChests.size;
+  const deadEnemies = new Set(checkpoint.deadEnemies);
+  for (const enemy of enemies) {
+    if (!deadEnemies.has(enemy.spawnId)) continue;
+    enemy.hp = 0;
+    enemy.dead = true;
+    enemy.lootDropped = true;
+    enemy.root.visible = false;
+  }
+  for (const drop of checkpoint.loot) createLootVisual(drop.itemId, new THREE.Vector3(drop.x, 0, drop.z));
+  for (const saved of checkpoint.gates) {
+    const gate = findGate(saved.corridorId);
+    if (!gate?.roomIds.includes(saved.wallRoomId)) continue;
+    moveGateAssemblyToRoom(gate, saved.wallRoomId);
+    for (const roomId of gate.roomIds) setGateWallFrameVisible(gate, roomId, saved.visibleFrames.includes(roomId));
+  }
+  updateHealthUi();
+  updateInventoryUi();
+  updateQuestUi();
 }
 
 function talkToTownNpc(npc) {
@@ -1856,7 +1179,7 @@ function updateProgression() {
   }
   const traversedGate = transition.traversedGate;
   if (traversedGate) {
-    if (E2E_ENABLED) e2eState.fastGateTransitions += 1;
+    diagnostics?.onGateTraversal();
     returnCrossingGuardians(traversedGate, transition.roomId);
     traversedGate.open = false;
     traversedGate.root.visible = true;
@@ -1874,6 +1197,8 @@ function updateProgression() {
     addCameraFeedback(0.035, 1.1);
     if (traversedGate) setToast('The gate closes and the previous chamber fades into the dark.');
   }
+  checkpointPosition = { x: player.root.position.x, z: player.root.position.z };
+  saveCheckpoint();
 }
 
 function runObjectivesComplete() {
@@ -2419,7 +1744,7 @@ function updateInterface(delta, force = false) {
   updateTargetUi();
   updateQuestUi();
   updateInteractionUi();
-  publishE2eSnapshot();
+  diagnostics?.publish();
 }
 
 // Burst particles share one frozen geometry and draw from a pool of meshes.
@@ -3031,6 +2356,7 @@ function damagePlayer(amount, sourceName) {
 }
 
 function updatePlayer(delta) {
+  if (diagnostics?.autoWalk(delta)) return;
   if (player.dead) return;
   state.footstepTimer = Math.max(0, state.footstepTimer - delta);
   if (player.attackTimer > 0) {
@@ -3063,7 +2389,7 @@ function updatePlayer(delta) {
       player.play(['idle']);
     }
   }
-  sampleKeyboardSmokeMovement();
+  diagnostics?.sampleMovement();
 }
 
 function updateWeaponState(delta) {
@@ -3334,114 +2660,6 @@ function updateEnemy(enemy, delta) {
   }
 }
 
-function minimapPoint(x, z) {
-  const pad = 10;
-  return {
-    x: pad + ((x - WORLD.minX) / (WORLD.maxX - WORLD.minX)) * (minimap.width - pad * 2),
-    y: pad + ((z - WORLD.minZ) / (WORLD.maxZ - WORLD.minZ)) * (minimap.height - pad * 2),
-  };
-}
-
-function townMinimapPoint(x, z) {
-  const pad = 10;
-  return {
-    x: pad + ((x - TOWN_WORLD.minX) / (TOWN_WORLD.maxX - TOWN_WORLD.minX)) * (minimap.width - pad * 2),
-    y: pad + ((z - TOWN_WORLD.minZ) / (TOWN_WORLD.maxZ - TOWN_WORLD.minZ)) * (minimap.height - pad * 2),
-  };
-}
-
-function drawMinimapZone(zone, fill, stroke, lineWidth = 1) {
-  const first = minimapPoint(zone.minX, zone.minZ);
-  const second = minimapPoint(zone.maxX, zone.maxZ);
-  minimapContext.fillStyle = fill;
-  minimapContext.strokeStyle = stroke;
-  minimapContext.lineWidth = lineWidth;
-  minimapContext.fillRect(first.x, first.y, second.x - first.x, second.y - first.y);
-  minimapContext.strokeRect(first.x, first.y, second.x - first.x, second.y - first.y);
-}
-
-function updateMinimap(delta, force = false) {
-  state.minimapTimer -= delta;
-  if (!force && state.minimapTimer > 0) return;
-  state.minimapTimer = 0.1;
-  minimapContext.clearRect(0, 0, minimap.width, minimap.height);
-  minimapContext.fillStyle = '#070912';
-  minimapContext.fillRect(0, 0, minimap.width, minimap.height);
-
-  if (state.mode === 'town') {
-    const first = townMinimapPoint(TOWN_WORLD.minX, TOWN_WORLD.minZ);
-    const second = townMinimapPoint(TOWN_WORLD.maxX, TOWN_WORLD.maxZ);
-    minimapContext.fillStyle = 'rgba(63, 99, 70, 0.95)';
-    minimapContext.fillRect(first.x, first.y, second.x - first.x, second.y - first.y);
-    minimapContext.fillStyle = 'rgba(155, 130, 96, 0.9)';
-    const roadStart = townMinimapPoint(-2.1, TOWN_WORLD.minZ);
-    const roadEnd = townMinimapPoint(2.1, TOWN_WORLD.maxZ);
-    minimapContext.fillRect(roadStart.x, roadStart.y, roadEnd.x - roadStart.x, roadEnd.y - roadStart.y);
-    const crossStart = townMinimapPoint(TOWN_WORLD.minX, 2.25);
-    const crossEnd = townMinimapPoint(TOWN_WORLD.maxX, 5.35);
-    minimapContext.fillRect(crossStart.x, crossStart.y, crossEnd.x - crossStart.x, crossEnd.y - crossStart.y);
-    for (const npc of townNpcs) {
-      const point = townMinimapPoint(npc.root.position.x, npc.root.position.z);
-      minimapContext.fillStyle = npc.role === 'Hunter' ? '#e7c16f' : '#b8a0e8';
-      minimapContext.beginPath();
-      minimapContext.arc(point.x, point.y, npc.role === 'Hunter' ? 3.4 : 2.6, 0, Math.PI * 2);
-      minimapContext.fill();
-    }
-    const playerPoint = townMinimapPoint(player.root.position.x, player.root.position.z);
-    minimapContext.fillStyle = '#fff5df';
-    minimapContext.beginPath();
-    minimapContext.arc(playerPoint.x, playerPoint.y, 3.6, 0, Math.PI * 2);
-    minimapContext.fill();
-    return;
-  }
-
-  for (const corridor of MAP.corridors) {
-    drawMinimapZone(corridor, 'rgba(48, 47, 65, 0.8)', 'rgba(111, 103, 132, 0.36)');
-  }
-  for (const room of MAP.rooms) {
-    const discovered = state.discoveredRooms.has(room.id);
-    const branch = ROOM_BRANCH[room.id];
-    const fill = !discovered
-      ? 'rgba(20, 22, 33, 0.9)'
-      : branch === 'west'
-        ? 'rgba(91, 66, 57, 0.92)'
-        : branch === 'east'
-          ? 'rgba(47, 75, 88, 0.92)'
-          : branch === 'north'
-            ? 'rgba(67, 54, 88, 0.92)'
-            : 'rgba(62, 61, 81, 0.92)';
-    const current = room.id === state.currentRoomId;
-    drawMinimapZone(
-      room,
-      fill,
-      current ? 'rgba(242, 218, 169, 0.95)' : discovered ? 'rgba(164, 150, 179, 0.65)' : 'rgba(71, 72, 87, 0.5)',
-      current ? 2 : 1,
-    );
-  }
-
-  for (const chest of state.chests) {
-    if (chest.opened || !state.discoveredRooms.has(chest.roomId)) continue;
-    const point = minimapPoint(chest.position.x, chest.position.z);
-    minimapContext.fillStyle = chest.kind === 'seal' || chest.kind === 'archive' ? '#e7c16f' : '#9b8766';
-    minimapContext.fillRect(point.x - 2.5, point.y - 2.5, 5, 5);
-  }
-  const playerPoint = minimapPoint(player.root.position.x, player.root.position.z);
-  minimapContext.fillStyle = '#c9b2f0';
-  minimapContext.strokeStyle = '#fff5df';
-  minimapContext.lineWidth = 1.4;
-  minimapContext.beginPath();
-  minimapContext.arc(playerPoint.x, playerPoint.y, 4, 0, Math.PI * 2);
-  minimapContext.fill();
-  minimapContext.stroke();
-  minimapContext.beginPath();
-  minimapContext.moveTo(playerPoint.x, playerPoint.y);
-  minimapContext.lineTo(
-    playerPoint.x + Math.sin(player.root.rotation.y) * 8,
-    playerPoint.y + Math.cos(player.root.rotation.y) * 8,
-  );
-  minimapContext.stroke();
-}
-
 function updateCamera(delta) {
   camera.position.sub(state.cameraOffset);
   state.cameraOffset.set(0, 0, 0);
@@ -3481,17 +2699,7 @@ function openChest(chest) {
     setToast(blockReason, 2200);
     return;
   }
-  chest.opened = true;
-  chest.root.visible = false;
-  chest.rewardRoot = createStatic('chestGold', {
-    x: chest.position.x,
-    z: chest.position.z,
-    width: 1.35,
-    height: 1.05,
-    parent: zoneRenderGroups.get(chest.roomId),
-    colliderWidth: 1.25,
-    colliderDepth: 0.9,
-  });
+  showChestOpened(chest);
   applyChestRewards(state, chest, Object.keys(state.actionCooldowns));
   if (chest.kind === 'seal') {
     spawnCombatText(chest.position, `${chest.branch.toUpperCase()} SEAL`, '#f2cf7c', 1.8);
@@ -3509,6 +2717,21 @@ function openChest(chest) {
   updateHealthUi();
   updateProgression();
   updateQuestUi();
+  saveCheckpoint();
+}
+
+function showChestOpened(chest) {
+  chest.opened = true;
+  chest.root.visible = false;
+  chest.rewardRoot = createStatic('chestGold', {
+    x: chest.position.x,
+    z: chest.position.z,
+    width: 1.35,
+    height: 1.05,
+    parent: zoneRenderGroups.get(chest.roomId),
+    colliderWidth: 1.25,
+    colliderDepth: 0.9,
+  });
 }
 
 function interact() {
@@ -3544,6 +2767,11 @@ function finishRun(success) {
   if (state.finished || state.failed) return;
   state.finished = success;
   state.failed = !success;
+  // Victory ends the delve; defeat keeps the last checkpoint and retries it
+  // with full vitality so a low-health save cannot trap the player.
+  const checkpoint = readCheckpoint(saveStorage, WORLD_DATA);
+  if (success) clearCheckpoint(saveStorage);
+  else if (checkpoint) writeCheckpoint(saveStorage, { ...checkpoint, playerHp: state.playerMaxHp });
   clearInputState();
   controls.enabled = false;
   state.playerBuffTimer = 0;
@@ -3567,11 +2795,16 @@ function finishRun(success) {
     endEyebrow.textContent = 'CRYPT CLEARED';
     endTitle.textContent = 'The path is clear.';
     endCopy.textContent = 'You cleared every chamber in the expanded crypt.';
+    restartButton.textContent = 'Run it again';
   } else {
     endEyebrow.textContent = 'THE CRYPT WINS';
     endTitle.textContent = 'The lanterns go dark.';
-    endCopy.textContent = 'The route is short. Try again and keep the dead at sword’s reach.';
+    endCopy.textContent = checkpoint
+      ? 'Retry from the last chamber you entered with full vitality, or start a new delve.'
+      : 'Try again and keep the dead at sword’s reach.';
+    restartButton.textContent = checkpoint ? 'Retry from checkpoint' : 'Try again';
   }
+  endNewGameButton.classList.toggle('is-hidden', success || !checkpoint);
   endScreen.classList.remove('is-hidden');
   targetCard.classList.add('is-hidden');
   interaction.classList.add('is-hidden');
@@ -3579,26 +2812,86 @@ function finishRun(success) {
   updateHealthUi();
   updateQuestUi();
   restartButton.focus({ preventScroll: true });
-  publishE2eSnapshot(true);
+  diagnostics?.publish(true);
 }
 
 function resetRun() {
   window.location.reload();
 }
 
+function startNewGame() {
+  clearCheckpoint(saveStorage);
+  // Stop the pagehide save from writing this run back during the reload.
+  saveStorage = null;
+  window.location.reload();
+}
+
+function setPaused(paused) {
+  if (paused === state.paused || !runInProgress()) return;
+  state.paused = paused;
+  clearInputState();
+  controls.enabled = !paused && !renderingPaused;
+  pauseScreen.classList.toggle('is-hidden', !paused);
+  // Keep keyboard focus and clicks inside the modal pause screen.
+  for (const element of app.children) {
+    if (element !== pauseScreen) element.inert = paused;
+  }
+  if (paused) {
+    resumeButton.focus({ preventScroll: true });
+    return;
+  }
+  // Drop focus from the pause controls so Space attacks instead of re-pausing.
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  if (state.teleporting && trailTimeout === null && !renderingPaused) enterDungeon();
+}
+
+function applyMuted(muted) {
+  setMuted(muted);
+  soundButton.textContent = muted ? 'Sound off' : 'Sound on';
+}
+
+function toggleMuted() {
+  applyMuted(!isMuted());
+  try {
+    browserStorage()?.setItem(MUTED_KEY, isMuted() ? '1' : '0');
+  } catch {
+    // The preference lasts for this page when storage is unavailable.
+  }
+  setToast(isMuted() ? 'Sound muted.' : 'Sound on.', 1100);
+}
+
 async function loadAssets() {
   const entries = Object.entries(ASSETS);
-  for (let index = 0; index < entries.length; index += 1) {
-    const [key, url] = entries[index];
-    const label = key === 'knight' ? 'Calling the cryptwalker' : `Loading ${key.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`)}`;
-    setLoading(0.08 + (index / entries.length) * 0.82, label);
-    const gltf = await loader.loadAsync(url);
-    assets.set(key, gltf);
-  }
+  let loadedCount = 0;
+  let failed = false;
+  setLoading(0.08, 'Calling the cryptwalker');
+  await Promise.all(entries.map(async ([key, url]) => {
+    try {
+      assets.set(key, await loader.loadAsync(url));
+    } catch (error) {
+      failed = true;
+      throw error;
+    }
+    loadedCount += 1;
+    // After one model fails, start() shows the error; later loads keep it.
+    if (!failed) setLoading(0.08 + (loadedCount / entries.length) * 0.82, `Raising the crypt (${loadedCount}/${entries.length})`);
+  }));
   setLoading(0.96, 'Lighting the last room');
 }
 
 function onKeyDown(event) {
+  const pressed = event.key.toLowerCase();
+  // Leave browser and OS shortcuts such as Cmd+P and Cmd+M alone.
+  const shortcut = state.loaded && !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey;
+  if (shortcut && (pressed === 'p' || (pressed === 'escape' && state.paused))) {
+    setPaused(!state.paused);
+    event.preventDefault();
+    return;
+  }
+  if (shortcut && pressed === 'm') {
+    toggleMuted();
+    return;
+  }
   if (!canPlay()) return;
   const target = event.target;
   if (target instanceof Element) {
@@ -3737,8 +3030,11 @@ window.addEventListener('keydown', onKeyDown, { passive: false });
 window.addEventListener('keyup', onKeyUp);
 window.addEventListener('blur', clearInputState);
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) clearInputState();
+  if (!document.hidden) return;
+  clearInputState();
+  saveCheckpoint();
 });
+window.addEventListener('pagehide', saveCheckpoint);
 canvas.addEventListener('pointerdown', (event) => {
   if (!canPlay() || event.button !== 0) return;
   initAudio();
@@ -3773,6 +3069,16 @@ backpackSlots.forEach((button) => {
   button.addEventListener('click', () => useInventorySlot(Number(button.dataset.inventorySlot)));
 });
 restartButton.addEventListener('click', resetRun);
+endNewGameButton.addEventListener('click', startNewGame);
+pauseNewGameButton.addEventListener('click', startNewGame);
+pauseButton.addEventListener('click', () => setPaused(!state.paused));
+resumeButton.addEventListener('click', () => setPaused(false));
+soundButton.addEventListener('click', toggleMuted);
+try {
+  applyMuted(browserStorage()?.getItem(MUTED_KEY) === '1');
+} catch {
+  applyMuted(false);
+}
 
 async function start() {
   try {
@@ -3799,9 +3105,11 @@ async function start() {
     updateMinimap(0, true);
     setLoading(1, 'Ravenrest is awake');
     window.setTimeout(() => loadingScreen.classList.add('is-hidden'), 420);
-    setToast('Find Ranger Rowan by the archery yard.');
+    const checkpoint = readCheckpoint(saveStorage, WORLD_DATA);
+    if (checkpoint) enterDungeon(checkpoint);
+    else setToast('Find Ranger Rowan by the archery yard.');
     window.__gameReady = true;
-    publishE2eSnapshot(true);
+    diagnostics?.publish(true);
   } catch (error) {
     console.error(error);
     loadingLabel.textContent = 'The asset bundle could not be opened. Check the browser console.';
@@ -3809,380 +3117,39 @@ async function start() {
   }
 }
 
+// Installed before start() so load-time errors reach the published snapshot.
+const diagnostics = E2E_ENABLED ? installDiagnostics({
+  app,
+  state,
+  camera,
+  townNpcs,
+  zoneRenderGroups,
+  enemies,
+  lootDrops,
+  objective,
+  objectiveDetail,
+  get player() {
+    return player;
+  },
+  get renderingPaused() {
+    return renderingPaused;
+  },
+  countLivingEnemies,
+  runObjectivesComplete,
+  chestById,
+  updateZoneVisibility,
+  enterDungeon,
+  talkToTownNpc,
+  updateProgression,
+  moveActorWithinMap,
+  createLootVisual,
+  nearestLootDrop,
+  updateLootDrops,
+  findGate,
+  clearEnemies,
+  openGate,
+  interact,
+  clearInputState,
+}) : null;
+
 start();
-
-// --- Profiling instrumentation (opt in through __cryptRun) ---
-window.__cryptProfile = null;
-window.__cryptDone = false;
-window.__cryptError = null;
-window.__cryptMark = (label) => {
-  const profile = window.__cryptProfile;
-  if (profile?.active) profile.marks.push({ t: performance.now(), label });
-};
-
-function diagnosticBlockReason() {
-  if (!E2E_ENABLED) return 'Open the game with ?e2e to run diagnostics.';
-  if (!state.loaded) return 'Wait for the game to finish loading.';
-  if (renderingPaused) return 'Wait for the graphics context to recover.';
-  if (e2eState.activeDiagnostic) return 'Another diagnostic is already running.';
-  if (e2eState.routeUsed || state.mode !== 'town' || state.teleporting) {
-    return 'Reload the page to start a diagnostic from town.';
-  }
-  return '';
-}
-
-window.__cryptRun = async (instant = false) => {
-  const blocked = diagnosticBlockReason();
-  if (blocked) throw new Error(blocked);
-  e2eState.activeDiagnostic = 'profile';
-  e2eState.routeUsed = true;
-  const profile = window.__cryptProfile ??= createCryptProfile();
-  profile.frames.length = 0;
-  profile.zones.length = 0;
-  profile.marks.length = 0;
-  profile.active = true;
-  window.__cryptDone = false;
-  window.__cryptError = null;
-  const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
-  const walkTo = (x, z, threshold = 0.3) => waitForProfileTarget({
-    x,
-    z,
-    setTarget: (target) => { window.__cryptWalkTarget = target; },
-    getPosition: () => player.root.position,
-    wait,
-    threshold,
-  });
-  const clearProfileRoom = () => clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
-  const openProfileGate = async (corridorId) => {
-    const gate = findGate(corridorId);
-    if (!gate) throw new Error(`Profile route has no gate for ${corridorId}.`);
-    if (gate.open) return;
-    await walkTo(gate.position.x, gate.position.z, 1.2);
-    clearProfileRoom();
-    openGate(gate);
-    if (!gate.open) throw new Error(`Profile route could not open ${corridorId}.`);
-    await wait(100);
-  };
-  try {
-    window.__cryptMark('route:start');
-    if (!instant) {
-      const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
-      if (!rowan) throw new Error('Profile route could not find Ranger Rowan.');
-      await walkTo(rowan.root.position.x, rowan.root.position.z);
-      window.__cryptMark('town:at-rowan');
-      talkToTownNpc(rowan);
-      window.__cryptWalkTarget = null;
-      await wait(1400);
-      if (state.mode !== 'dungeon') throw new Error('Profile route did not enter the dungeon.');
-    } else {
-      enterDungeon();
-      await wait(400);
-    }
-    window.__cryptMark('dungeon:entered');
-    // Entrance -> hub.
-    await openProfileGate('entry-corridor');
-    await walkTo(3, 16);
-    await walkTo(3, 12.5);
-    await walkTo(-5, 12.5);
-    window.__cryptMark('room:hub');
-    await wait(1200); // let hub lights/shaders settle
-    // West branch: gate corridor -> gate room -> burial -> ossuary.
-    await openProfileGate('west-corridor');
-    await walkTo(-26, 8);
-    window.__cryptMark('room:westGate');
-    await wait(800);
-    await openProfileGate('west-deep-corridor');
-    await walkTo(-47, 8);
-    window.__cryptMark('room:westBurial');
-    await walkTo(-49.3, 8);
-    await walkTo(-49.3, 3.5);
-    await walkTo(-47, 3.5);
-    await openProfileGate('west-drop');
-    await walkTo(-47, -2.5);
-    window.__cryptMark('room:westOssuary');
-    await wait(800);
-    // Return to hub, cross east.
-    await openProfileGate('west-drop');
-    await walkTo(-47, 3.5);
-    await walkTo(-49.3, 3.5);
-    await walkTo(-49.3, 8);
-    await openProfileGate('west-deep-corridor');
-    await walkTo(-26, 8);
-    await openProfileGate('west-corridor');
-    await walkTo(-5, 7.5);
-    await walkTo(5, 7.5);
-    await openProfileGate('east-corridor');
-    await walkTo(26, 8);
-    window.__cryptMark('room:eastGate');
-    await wait(800);
-    await openProfileGate('east-deep-corridor');
-    await walkTo(47, 8);
-    window.__cryptMark('room:eastFlooded');
-    await walkTo(49.3, 8);
-    await walkTo(49.3, 3.2);
-    await walkTo(47, 3.2);
-    await openProfileGate('east-drop');
-    await walkTo(47, -6);
-    window.__cryptMark('room:eastReliquary');
-  } catch (error) {
-    window.__cryptError = error instanceof Error ? error.message : String(error);
-    throw error;
-  } finally {
-    profile.active = false;
-    window.__cryptDone = true;
-    window.__cryptWalkTarget = null;
-    e2eState.activeDiagnostic = null;
-  }
-};
-
-// Auto-walk hook: when a profile target exists, inject movement toward it.
-// Test-only: production keeps the unpatched updatePlayer.
-if (E2E_ENABLED) {
-  const originalUpdate = updatePlayer;
-  updatePlayer = function patchedUpdatePlayer(delta) {
-    const target = window.__cryptWalkTarget;
-    if (target && player && !player.dead && player.attackLock <= 0) {
-      movementDirection.set(target.x - player.root.position.x, 0, target.z - player.root.position.z);
-      const distance = movementDirection.length();
-      if (distance > 0.25) {
-        movementDirection.normalize();
-        moveActorWithinMap(player, movementDirection.x * player.speed * delta * 1.15, movementDirection.z * player.speed * delta * 1.15, 0.65);
-        player.faceDirection(movementDirection);
-        player.play(['running', 'walking']);
-        state.started = true;
-        state.combatStarted = true;
-        sampleKeyboardSmokeMovement();
-        return;
-      }
-    }
-    originalUpdate(delta);
-  };
-}
-// --- Fast functional-checkpoint surface (opt in through ?e2e) ---
-// Not a performance instrument: it bypasses animation time. Use __cryptRun
-// for any timing/frame measurement.
-if (E2E_ENABLED) {
-  const placeAt = (x, z) => {
-    if (!player) throw new Error('World not built yet.');
-    player.root.position.x = x;
-    player.root.position.z = z;
-    updateProgression();
-    publishE2eSnapshot(true);
-  };
-  const clearAllEnemies = () => clearEnemies();
-  const openFastGate = (corridorId) => {
-    const gate = findGate(corridorId);
-    if (!gate) throw new Error(`No gate for ${corridorId}.`);
-    openGate(gate);
-    if (!gate.open) throw new Error(`Fast route could not open ${corridorId}.`);
-  };
-  const interactChestAt = (id, x, z) => {
-    placeAt(x, z);
-    const chest = chestById(id);
-    if (!chest) throw new Error(`Fast route has no chest for ${id}.`);
-    interact();
-    if (!chest.opened) throw new Error(`Fast route could not open ${id}.`);
-  };
-  const runFastCheckpoint = async () => {
-    const blocked = diagnosticBlockReason();
-    if (blocked) throw new Error(blocked);
-    e2eState.activeDiagnostic = 'fast-checkpoint';
-    e2eState.routeUsed = true;
-    setE2eResult(null);
-    const startedAt = performance.now();
-    e2eState.fastGateTransitions = 0;
-    try {
-      enterDungeon();
-      state.started = true;
-      clearAllEnemies();
-      const lootDrop = createLootVisual('healingDraft', player.root.position);
-      const lootGroup = zoneRenderGroups.get(lootDrop.zoneId);
-      const lootPhase = lootDrop.phase;
-      updateZoneVisibility('hub', true);
-      updateLootDrops(0.1);
-      const lootHidden = lootDrop.root.parent === lootGroup
-        && !lootGroup.visible && lootDrop.phase === lootPhase && nearestLootDrop(2) === null;
-      updateZoneVisibility('entrance', true);
-      updateLootDrops(0.1);
-      const lootRevealed = lootGroup.visible && lootDrop.phase !== lootPhase && nearestLootDrop(2) === lootDrop;
-      interact();
-
-      placeAt(0, 26.8);
-      openFastGate('entry-corridor');
-      placeAt(0, 12);
-      interactChestAt('hub-cache', 0, 14.2);
-
-      openFastGate('west-corridor');
-      placeAt(-26, 9);
-      openFastGate('west-deep-corridor');
-      placeAt(-47, 9);
-      interactChestAt('ashen-cache', -47, 10);
-      openFastGate('west-drop');
-      interactChestAt('west-seal', -47, -13);
-
-      openFastGate('west-drop');
-      placeAt(-47, 9);
-      openFastGate('west-deep-corridor');
-      placeAt(-26, 9);
-      openFastGate('west-corridor');
-      placeAt(0, 12);
-      openFastGate('east-corridor');
-      placeAt(26, 9);
-      openFastGate('east-deep-corridor');
-      placeAt(47, 9);
-      interactChestAt('drowned-cache', 47, 10);
-      openFastGate('east-drop');
-      interactChestAt('east-seal', 47, -12.5);
-
-      openFastGate('east-drop');
-      placeAt(47, 9);
-      openFastGate('east-deep-corridor');
-      placeAt(26, 9);
-      openFastGate('east-corridor');
-      placeAt(0, 12);
-      openFastGate('north-corridor');
-      placeAt(0, -10);
-      openFastGate('archive-corridor');
-      placeAt(0, -24);
-      interactChestAt('archive-key', 0, -27);
-      openFastGate('warden-corridor');
-      placeAt(0, -42);
-      interactChestAt('warden-spoils', 0, -47.5);
-      openFastGate('warden-corridor');
-      placeAt(0, -24);
-      openFastGate('archive-corridor');
-      placeAt(0, -10);
-      openFastGate('north-corridor');
-      placeAt(0, 12);
-      openFastGate('entry-corridor');
-      placeAt(0, 32.4);
-      await new Promise((resolve) => window.requestAnimationFrame(resolve));
-      await new Promise((resolve) => window.requestAnimationFrame(resolve));
-      const snapshot = e2eSnapshot();
-      const requiredChestIds = ['west-seal', 'east-seal', 'archive-key', 'warden-spoils'];
-      const assertions = {
-        finished: snapshot.finished && !snapshot.failed,
-        seals: snapshot.seals.west && snapshot.seals.east,
-        archiveKey: snapshot.archiveKey,
-        requiredChests: requiredChestIds.every((id) => snapshot.chests.find((chest) => chest.id === id)?.opened),
-        lootHidden,
-        lootRevealed,
-        lootCollected: lootDrop.collected && lootDrop.root.parent === null,
-        interacted: snapshot.interactionCount >= requiredChestIds.length + 4,
-        gateTraversal: e2eState.fastGateTransitions === state.gates.length * 2
-          && snapshot.gates.every((gate) => !gate.open),
-        objectives: snapshot.objectives.complete,
-      };
-      setE2eResult({
-        kind: 'fast-functional-checkpoint',
-        pass: Object.values(assertions).every(Boolean),
-        durationMs: Math.round(performance.now() - startedAt),
-        assertions,
-        snapshot,
-      });
-    } catch (error) {
-      setE2eResult({
-        kind: 'fast-functional-checkpoint',
-        pass: false,
-        durationMs: Math.round(performance.now() - startedAt),
-        error: error instanceof Error ? error.message : String(error),
-        snapshot: e2eSnapshot(),
-      });
-    } finally {
-      e2eState.activeDiagnostic = null;
-    }
-  };
-  const startKeyboardSmoke = () => {
-    const blocked = diagnosticBlockReason();
-    if (blocked) throw new Error(blocked);
-    e2eState.activeDiagnostic = 'keyboard-smoke';
-    clearInputState();
-    const rowan = townNpcs.find((npc) => npc.role === 'Hunter');
-    if (rowan) player.root.position.copy(rowan.root.position);
-    state.lastInteraction = null;
-    camera.getWorldDirection(cameraForward);
-    cameraForward.y = 0;
-    cameraForward.normalize();
-    e2eState.smoke = {
-      startedAt: performance.now(),
-      cameraForward: { x: cameraForward.x, z: cameraForward.z },
-      interactionBefore: state.interactionCount,
-      lastInteractionBefore: state.lastInteraction,
-      errorsBefore: e2eState.errors.length,
-      sampleMode: state.mode,
-      sample: { x: player.root.position.x, z: player.root.position.z },
-      pathDistance: 0,
-      forwardTravel: 0,
-    };
-    setE2eResult(null);
-  };
-  const finishKeyboardSmoke = () => {
-    if (e2eState.activeDiagnostic && e2eState.activeDiagnostic !== 'keyboard-smoke') return;
-    const smoke = e2eState.smoke;
-    if (!smoke) {
-      setE2eResult({ kind: 'keyboard-smoke', pass: false, error: 'Smoke was not started.' });
-      return;
-    }
-    e2eState.smoke = null;
-    e2eState.activeDiagnostic = null;
-    const distance = smoke.pathDistance;
-    const forwardDot = distance > 0.001 ? smoke.forwardTravel / distance : 0;
-    const assertions = {
-      cameraRelativeW: distance > 0.1 && forwardDot > 0.55,
-      interacted: state.interactionCount > smoke.interactionBefore
-        && state.lastInteraction !== smoke.lastInteractionBefore
-        && state.lastInteraction?.kind === 'npc',
-      windowRuntimeErrors: e2eState.errors.length === smoke.errorsBefore,
-    };
-    setE2eResult({
-      kind: 'keyboard-smoke',
-      pass: Object.values(assertions).every(Boolean),
-      durationMs: Math.round(performance.now() - smoke.startedAt),
-      assertions,
-      errorSources: ['window.error', 'unhandledrejection'],
-      movement: { distance, forwardDot },
-      snapshot: e2eSnapshot(),
-    });
-  };
-
-  const controls = document.createElement('section');
-  controls.id = 'e2e-controls';
-  controls.setAttribute('aria-label', 'Browser validation controls');
-  controls.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;display:flex;gap:4px;';
-  const addCommand = (command, label, handler) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.dataset.e2eCommand = command;
-    button.textContent = label;
-    button.addEventListener('click', async () => {
-      if (e2eState.activeDiagnostic
-        && (command !== 'smoke-finish' || e2eState.activeDiagnostic !== 'keyboard-smoke')) return;
-      try {
-        await handler();
-      } catch (error) {
-        setE2eResult({ kind: command, pass: false, error: error instanceof Error ? error.message : String(error), snapshot: e2eSnapshot() });
-      }
-      publishE2eSnapshot(true);
-    });
-    controls.append(button);
-  };
-  addCommand('smoke-start', 'Start keyboard smoke', startKeyboardSmoke);
-  addCommand('smoke-finish', 'Finish keyboard smoke', finishKeyboardSmoke);
-  addCommand('fast-checkpoint', 'Run fast checkpoint', runFastCheckpoint);
-  app.append(controls);
-
-  window.__cryptTest = {
-    snapshot: e2eSnapshot,
-    enterDungeon,
-    placeAt,
-    clearRoom() {
-      clearEnemies((enemy) => enemy.roomId === state.currentRoomId);
-    },
-    openGateById(corridorId) {
-      const gate = findGate(corridorId);
-      if (!gate) throw new Error(`No gate for ${corridorId}.`);
-      openGate(gate);
-      return gate.open;
-    },
-  };
-}

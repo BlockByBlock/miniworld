@@ -24,6 +24,9 @@
           <span class="eyebrow">THREATS</span>
           <strong id="threat-value">36 REMAIN</strong>
         </div>
+        <button id="pause-button" class="pause-button" type="button" title="Pause (P)" aria-label="Pause. Press P.">
+          <span aria-hidden="true">II</span>
+        </button>
       </header>
 
       <section class="hud quest-card" aria-live="polite">
@@ -116,7 +119,21 @@
         <span id="end-eyebrow" class="eyebrow">CRYPT CLEARED</span>
         <h2 id="end-title">The path is clear.</h2>
         <p id="end-copy">The expanded crypt is clear.</p>
-        <button id="restart-button" type="button">Run it again</button>
+        <div class="card-actions">
+          <button id="restart-button" type="button">Run it again</button>
+          <button id="end-new-game-button" class="secondary" type="button">New game</button>
+        </div>
+      </div>
+
+      <div id="pause-screen" class="screen-card end-card is-hidden" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <span class="eyebrow">PAUSED</span>
+        <h2 id="pause-title">The crypt waits.</h2>
+        <p>Progress saves when you enter a chamber or open a reliquary. Press <kbd>P</kbd> or <kbd>Esc</kbd> to resume and <kbd>M</kbd> to toggle sound.</p>
+        <div class="card-actions">
+          <button id="resume-button" type="button">Resume</button>
+          <button id="sound-button" class="secondary" type="button" aria-pressed="true">Sound on</button>
+          <button id="pause-new-game-button" class="secondary" type="button">New game</button>
+        </div>
       </div>
     </main>
 
